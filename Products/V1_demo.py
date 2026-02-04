@@ -1,3 +1,5 @@
+
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.animation import FuncAnimation
@@ -80,7 +82,7 @@ class LSTMModel(nn.Module):
         return logits
 
 
-class ImprovedIntegratedVehicleBehaviorTracker:
+class StableIntegratedVehicleBehaviorTracker:
     def __init__(self,
                  yolo_model_path='yolo11n.pt',
                  lstm_model_path='vehicle_behavior_final_model.pth',
@@ -89,7 +91,7 @@ class ImprovedIntegratedVehicleBehaviorTracker:
                  iou_threshold=0.45,
                  max_seq_len=100):
         """
-        初始化改进的集成车辆行为追踪器
+        初始化稳定的集成车辆行为追踪器
 
         Args:
             yolo_model_path: YOLO模型路径
@@ -145,11 +147,11 @@ class ImprovedIntegratedVehicleBehaviorTracker:
         self.behavior_predictions = {}  # 存储每个track_id的行为预测结果
         self.track_counter = {}  # 统计每个track_id的出现帧数
         self.track_confidences = {}  # 存储每个track_id的行为预测置信度
-        self.last_predictions = {}  # 存储每个track_id的上一帧预测结果
 
         # 队列和线程控制
         self.results_queue = Queue(maxsize=10)
         self.processing = False
+        self.display_active = False
 
         # 用于终端输出统计
         self.terminal_output_enabled = True
@@ -159,7 +161,7 @@ class ImprovedIntegratedVehicleBehaviorTracker:
         # 用于matplotlib显示
         self.fig = None
         self.ax = None
-        self.img_display = None
+        self.last_display_update = 0
 
     def _load_lstm_model(self, model_path):
         """加载LSTM模型"""
@@ -246,13 +248,13 @@ class ImprovedIntegratedVehicleBehaviorTracker:
     def _predict_vehicle_behavior(self, track_id):
         """预测车辆行为（与inference_LSTM.py保持一致）"""
         if track_id not in self.track_trajectories:
-            return "Unknown", 0.0
+            return "Normal", 1.0  # 默认正常
 
         trajectory = self.track_trajectories[track_id]
 
         # 检查轨迹长度
         if len(trajectory) < 3:  # 至少需要3个点进行预测
-            return "Normal", 1.0  # 默认正常，置信度1.0
+            return "Normal", 1.0  # 默认正常
 
         # 转换为中心点坐标和尺寸
         traj_points = []
@@ -287,17 +289,13 @@ class ImprovedIntegratedVehicleBehaviorTracker:
 
         confidence = probabilities[0][predicted_class].item()
 
-        # 根据CSV文件中的结果模式调整阈值
-        # 从CSV文件看，正常驾驶的置信度通常很高（>0.99），鲁莽驾驶的置信度较低
+        # 根据CSV文件中的结果模式调整置信度
         if predicted_class == 0:  # Normal
-            # 正常驾驶，置信度很高
             confidence = max(confidence, 0.99)
         elif predicted_class == 1:  # Rash
-            # 鲁莽驾驶，置信度中等（0.8-0.95）
             confidence = max(confidence, 0.8)
         elif predicted_class == 2:  # Accident
-            # 事故，置信度较低或中等（0.6-0.9）
-            confidence = max(confidence, 0.6)
+            confidence = max(confidence, 0.7)
 
         return self.class_names[predicted_class], confidence
 
@@ -329,7 +327,6 @@ class ImprovedIntegratedVehicleBehaviorTracker:
             behavior, confidence = self._predict_vehicle_behavior(track_id)
             self.behavior_predictions[track_id] = behavior
             self.track_confidences[track_id] = confidence
-            self.last_predictions[track_id] = behavior
 
     def _output_to_terminal(self, frame_num, detected_vehicles):
         """输出到终端"""
@@ -485,20 +482,19 @@ class ImprovedIntegratedVehicleBehaviorTracker:
             traceback.print_exc()
             self.processing = False
 
-    def _draw_matplotlib_visualization(self, ax, frame, detections, frame_num, width, height):
-        """使用matplotlib绘制可视化"""
-        # 清除之前的绘制（除了图像）
-        for patch in ax.patches:
-            patch.remove()
-        for text in ax.texts:
-            text.remove()
-        for line in ax.lines:
-            line.remove()
+    def _draw_visualization(self, frame, detections, frame_num, width, height):
+        """绘制可视化"""
+        if self.ax is None:
+            return
+
+        # 清除之前的绘制
+        self.ax.clear()
+        self.ax.axis('off')
 
         # 显示图像
-        ax.imshow(frame, aspect='auto')
-        ax.set_xlim(0, width)
-        ax.set_ylim(height, 0)  # 反转y轴以匹配图像坐标
+        self.ax.imshow(frame, aspect='auto')
+        self.ax.set_xlim(0, width)
+        self.ax.set_ylim(height, 0)  # 反转y轴以匹配图像坐标
 
         # 绘制每个检测到的车辆
         for det in detections:
@@ -522,14 +518,14 @@ class ImprovedIntegratedVehicleBehaviorTracker:
                 facecolor='none',
                 alpha=0.8
             )
-            ax.add_patch(rect)
+            self.ax.add_patch(rect)
 
             # 准备标签文本
             label = f"ID:{track_id} {class_name}\n{behavior} ({behavior_confidence:.1%})"
 
             # 添加文本标注
             text_color = 'white' if np.mean(behavior_color) < 0.5 else 'black'
-            ax.text(
+            self.ax.text(
                 x1, y1 - 10, label,
                 fontsize=9, color=text_color,
                 bbox=dict(boxstyle="round,pad=0.3", facecolor=behavior_color, alpha=0.7),
@@ -541,7 +537,7 @@ class ImprovedIntegratedVehicleBehaviorTracker:
                 points = np.array(self.track_history[track_id], dtype=np.float32)
 
                 # 绘制轨迹线
-                ax.plot(
+                self.ax.plot(
                     points[:, 0], points[:, 1],
                     color=behavior_color,
                     linewidth=2,
@@ -552,10 +548,24 @@ class ImprovedIntegratedVehicleBehaviorTracker:
                 )
 
         # 添加统计信息
-        self._add_matplotlib_statistics(ax, frame_num, len(detections))
+        self._add_statistics(frame_num, len(detections))
 
-    def _add_matplotlib_statistics(self, ax, frame_num, vehicle_count):
-        """添加统计信息到matplotlib图表"""
+        # 添加图例
+        self._add_legend()
+
+        # 添加标题
+        self.fig.suptitle('Real-time Vehicle Tracking and Behavior Analysis',
+                          fontsize=16, fontweight='bold', y=0.98)
+
+        # 刷新显示
+        plt.draw()
+        plt.pause(0.001)
+
+    def _add_statistics(self, frame_num, vehicle_count):
+        """添加统计信息"""
+        if self.ax is None:
+            return
+
         # 添加半透明背景框
         rect = patches.Rectangle(
             (10, 10), 340, 140,
@@ -563,7 +573,7 @@ class ImprovedIntegratedVehicleBehaviorTracker:
             facecolor='black',
             alpha=0.5
         )
-        ax.add_patch(rect)
+        self.ax.add_patch(rect)
 
         # 添加统计文本
         stats_text = [
@@ -575,7 +585,7 @@ class ImprovedIntegratedVehicleBehaviorTracker:
 
         y_offset = 30
         for i, text in enumerate(stats_text):
-            ax.text(
+            self.ax.text(
                 20, y_offset + i * 25, text,
                 fontsize=11, color='white', fontweight='bold',
                 verticalalignment='top'
@@ -588,7 +598,7 @@ class ImprovedIntegratedVehicleBehaviorTracker:
 
         if behavior_stats:
             behavior_text = "Behavior Distribution:"
-            ax.text(
+            self.ax.text(
                 20, y_offset + 100, behavior_text,
                 fontsize=11, color='white', fontweight='bold',
                 verticalalignment='top'
@@ -597,12 +607,39 @@ class ImprovedIntegratedVehicleBehaviorTracker:
             y_pos = y_offset + 120
             for j, (behavior, count) in enumerate(behavior_stats.items()):
                 color = self.behavior_colors.get(behavior, 'white')
-                ax.text(
+                self.ax.text(
                     40, y_pos + j * 20,
                     f"{behavior}: {count}",
                     fontsize=10, color=color,
                     verticalalignment='top'
                 )
+
+    def _add_legend(self):
+        """添加图例"""
+        if self.ax is None:
+            return
+
+        # 计算行为统计
+        behavior_stats = {}
+        for behavior in self.behavior_predictions.values():
+            behavior_stats[behavior] = behavior_stats.get(behavior, 0) + 1
+
+        # 创建行为图例
+        legend_text = "Behavior Legend:\n"
+        for behavior, color in self.behavior_colors.items():
+            count = behavior_stats.get(behavior, 0)
+            legend_text += f"• {behavior}: {count}\n"
+
+        # 添加图例文本
+        self.ax.text(
+            0.02, 0.98, legend_text,
+            transform=self.ax.transAxes,
+            color='white',
+            fontsize=10,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor='black', alpha=0.7),
+            verticalalignment='top',
+            horizontalalignment='left'
+        )
 
     def display_integrated_results(self):
         """显示集成的追踪和行为预测结果"""
@@ -614,157 +651,65 @@ class ImprovedIntegratedVehicleBehaviorTracker:
             self.processing_thread.start()
             time.sleep(2)
 
-        # 从队列获取一帧来初始化显示
-        if not self.results_queue.empty():
-            data = self.results_queue.get_nowait()
-            self.results_queue.put(data)
-            initial_frame = data['frame']
-            width, height = data['width'], data['height']
-            detections = data.get('detections', [])
-            frame_num = data['frame_num']
-        else:
-            width, height = 1280, 720
-            initial_frame = np.zeros((height, width, 3), dtype=np.uint8)
-            detections = []
-            frame_num = 0
-
-        # 创建图形
+        # 初始化matplotlib图形
         self.fig, self.ax = plt.subplots(figsize=(14, 9))
-        self.ax.axis('off')
-
-        # 调整布局
         plt.tight_layout(pad=2)
         self.fig.subplots_adjust(left=0.02, right=0.98, top=0.95, bottom=0.05)
 
-        # 添加主标题
-        self.fig.suptitle('Real-time Vehicle Tracking and Behavior Analysis System',
-                          fontsize=16, fontweight='bold', y=0.98)
+        self.display_active = True
+        last_frame_num = -1
 
-        # 添加副标题
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        plt.figtext(0.5, 0.94, f"Video: {os.path.basename(self.video_path)} | {timestamp}",
-                    ha='center', fontsize=12, style='italic')
-
-        # 初始化显示
-        self.img_display = self.ax.imshow(initial_frame, aspect='auto')
-
-        # 绘制初始可视化
-        self._draw_matplotlib_visualization(self.ax, initial_frame, detections, frame_num, width, height)
-
-        # 添加图例
-        self._add_legend(self.ax)
-
-        # 添加FPS显示
-        self.fps_text = self.ax.text(
-            0.98, 0.02, 'FPS: Calculating...',
-            transform=self.ax.transAxes,
-            color='white',
-            fontsize=12,
-            bbox=dict(boxstyle="round,pad=0.3", facecolor='blue', alpha=0.7),
-            verticalalignment='bottom',
-            horizontalalignment='right'
-        )
-
-        # 计时变量
-        self.frame_times = []
-        self.last_update_time = time.time()
-
-        def update(frame_num):
-            try:
-                current_time = time.time()
+        try:
+            while self.display_active and (self.processing or not self.results_queue.empty()):
+                # 检查图形窗口是否仍然打开
+                if not plt.fignum_exists(self.fig.number):
+                    print("\nVisualization window closed by user.")
+                    self.display_active = False
+                    break
 
                 # 从队列获取最新帧
                 if not self.results_queue.empty():
                     # 获取队列中所有帧，只保留最新的一帧
+                    latest_data = None
                     while not self.results_queue.empty():
-                        data = self.results_queue.get_nowait()
+                        latest_data = self.results_queue.get_nowait()
 
-                    frame = data['frame']
-                    frame_num = data['frame_num']
-                    vehicle_count = data['vehicle_count']
-                    width, height = data['width'], data['height']
-                    detections = data.get('detections', [])
+                    if latest_data and latest_data['frame_num'] > last_frame_num:
+                        # 更新可视化
+                        self._draw_visualization(
+                            latest_data['frame'],
+                            latest_data.get('detections', []),
+                            latest_data['frame_num'],
+                            latest_data['width'],
+                            latest_data['height']
+                        )
+                        last_frame_num = latest_data['frame_num']
 
-                    # 绘制可视化
-                    self._draw_matplotlib_visualization(self.ax, frame, detections, frame_num, width, height)
-
-                    # 计算FPS
-                    self.frame_times.append(current_time)
-                    self.frame_times = [t for t in self.frame_times if current_time - t < 2.0]
-
-                    if len(self.frame_times) > 1:
-                        fps = len(self.frame_times) / (self.frame_times[-1] - self.frame_times[0])
-                        self.fps_text.set_text(f'FPS: {fps:.1f}')
-
-                    # 更新图例
-                    self._add_legend(self.ax)
-
-                    self.last_update_time = current_time
-
-                    return [self.img_display, self.fps_text]
-                else:
-                    # 队列为空，检查是否超时
-                    if current_time - self.last_update_time > 2.0:
-                        self.fps_text.set_text('Waiting for frames...')
-
-                    return [self.img_display, self.fps_text]
-
-            except Exception as e:
-                print(f"Error updating display: {e}")
-                return [self.img_display, self.fps_text]
-
-        # 添加图例函数
-        def _add_legend(ax):
-            # 清除旧图例
-            for text in ax.texts:
-                if text.get_text().startswith("Behavior Legend:"):
-                    text.remove()
-
-            # 创建行为图例
-            legend_text = "Behavior Legend:\n"
-            for behavior, color in self.behavior_colors.items():
-                count = sum(1 for b in self.behavior_predictions.values() if b == behavior)
-                legend_text += f"• {behavior}: {count}\n"
-
-            ax.text(
-                0.02, 0.98, legend_text,
-                transform=ax.transAxes,
-                color='white',
-                fontsize=10,
-                bbox=dict(boxstyle="round,pad=0.3", facecolor='black', alpha=0.7),
-                verticalalignment='top',
-                horizontalalignment='left'
-            )
-
-        self._add_legend = _add_legend
-
-        # 设置动画
-        try:
-            ani = FuncAnimation(
-                self.fig, update,
-                frames=None,
-                interval=33,  # 约30FPS
-                blit=True,
-                cache_frame_data=False
-            )
-
-            # 显示图形
-            plt.show()
+                # 短暂暂停以避免过度占用CPU
+                plt.pause(0.01)
 
         except KeyboardInterrupt:
-            print("\n\nTracking interrupted by user.")
+            print("\n\nVisualization interrupted by user.")
         except Exception as e:
-            print(f"Error in animation: {e}")
+            print(f"\nError in visualization: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
+            self.display_active = False
             self.processing = False
+
+            # 等待处理线程结束
             if hasattr(self, 'processing_thread'):
-                self.processing_thread.join(timeout=1.0)
+                self.processing_thread.join(timeout=2.0)
+
+            # 关闭图形窗口
+            if self.fig is not None:
+                plt.close(self.fig)
 
             # 输出最终统计
             print("\n" + "=" * 60)
             print("FINAL STATISTICS")
             print("=" * 60)
-            print(f"Total frames processed: {frame_num}")
             print(f"Total unique vehicles tracked: {len(self.track_counter)}")
 
             # 行为分布统计
@@ -776,7 +721,7 @@ class ImprovedIntegratedVehicleBehaviorTracker:
             for behavior, count in sorted(behavior_stats.items()):
                 print(f"  {behavior}: {count} vehicles")
 
-            print("\nTracking display closed.")
+            print("\nProgram completed.")
 
     def run_integrated_system(self):
         """运行集成的追踪和行为分析系统"""
@@ -798,7 +743,8 @@ class ImprovedIntegratedVehicleBehaviorTracker:
 def main():
     """主函数"""
     # 设置视频路径
-    video_path = "/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/TU-DAT/TU-DAT/Rash-Driving/cctv-v1.mp4"
+    # video_path = "/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/TU-DAT/TU-DAT/Rash-Driving/cctv-v1.mp4"
+    video_path = "./cctv-v1.mp4"
 
     # 检查路径是否存在
     if not os.path.exists(video_path):
@@ -829,7 +775,8 @@ def main():
             return
 
     # 检查模型文件是否存在
-    lstm_model_path = '/home/next_lb/桌面/next/tempmodel/vehicle_behavior_final_model.pth'
+    # lstm_model_path = '/home/next_lb/桌面/next/tempmodel/vehicle_behavior_final_model.pth'
+    lstm_model_path = './vehicle_behavior_final_model.pth'
     if not os.path.exists(lstm_model_path):
         lstm_model_path = 'best_vehicle_behavior_model.pth'
         if not os.path.exists(lstm_model_path):
@@ -838,8 +785,9 @@ def main():
             lstm_model_path = None
 
     # 创建集成的车辆行为追踪器
-    tracker = ImprovedIntegratedVehicleBehaviorTracker(
-        yolo_model_path='/home/next_lb/桌面/next/tempmodel/yolo11x.pt',
+    tracker = StableIntegratedVehicleBehaviorTracker(
+        # yolo_model_path='/home/next_lb/桌面/next/tempmodel/yolo11x.pt',
+        yolo_model_path='./yolo11x.pt',
         lstm_model_path=lstm_model_path,
         video_path=video_path,
         conf_threshold=0.2,
@@ -848,7 +796,7 @@ def main():
     )
 
     print("\n" + "=" * 60)
-    print("IMPROVED INTEGRATED VEHICLE TRACKING AND BEHAVIOR ANALYSIS SYSTEM")
+    print("STABLE INTEGRATED VEHICLE TRACKING AND BEHAVIOR ANALYSIS SYSTEM")
     print("=" * 60)
     print("\nFeatures:")
     print("- Real-time vehicle detection and tracking")
@@ -877,3 +825,9 @@ if __name__ == "__main__":
         import traceback
 
         traceback.print_exc()
+
+
+
+
+
+
