@@ -547,7 +547,7 @@ class YOLOVehicleTracker:
 
 def main():
     # 设置视频路径
-    video_path = "/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/TU-DAT/TU-DAT/Final_videos/Positive_Vidoes/"
+    video_path = "/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/TAD-benchmark/train/accident_大于10M/video147.mp4"
 
     # 创建车辆追踪器
     tracker = YOLOVehicleTracker(
