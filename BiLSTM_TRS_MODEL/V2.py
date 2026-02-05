@@ -211,11 +211,19 @@ class BiLSTMTransformer:
                 if value > self.rashRelatedParaTwo:
                     self.tempRecordRashStatusList.append(key)
 
-            # 先打印一下是否有超速危险的检测
-            # for key, value in
-            print(self.tempRecordRashStatusList)
+            # TODO: 对于一些超速车辆还要进行进一步的判定的
 
+            # 先打印一下是否有超速危险的检测
+            for i in range(len(self.tempRecordRashStatusList)):
+                print(f'追踪ID为: {self.tempRecordRashStatusList[i]}的车辆有超速的危险')
+            print('-'*30)
+            print('-'*30)
+            print('-'*30)
 
 
             # 接下来取出候选超速列表中的id进行进一步确认处理关于事故的检测
+            for i in range(len(self.tempRecordRashStatusList)):
+                for j in range(i+1, len(self.tempRecordRashStatusList)):
+                    # 取出这两个ID车辆当前最新的信息
+                    print(int(self.tempRecordRashStatusList[i]), int(self.tempRecordRashStatusList[j]))
 
