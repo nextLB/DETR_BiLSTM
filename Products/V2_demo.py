@@ -319,6 +319,8 @@ def determinate_vehicle_behavior_thread(determinateBasicInfoQueue):
         if basicInfo:
             # 数据预处理与准备
             BiLSTMTransformerInstance.data_preprocess_preparation()
+            # 进行行为的判别
+            BiLSTMTransformerInstance.conduct_behavior_assessment()
 
         basicInfo = None
         time.sleep(0.01)

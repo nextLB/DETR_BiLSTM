@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import copy
-
+import math
 
 # 3. BiLSTM+Transformer模型
 class noBiLSTMTransformer(nn.Module):
@@ -96,14 +96,65 @@ class BiLSTMTransformer:
         self.basedFrameCountInfo = {}
         self.currentVideoWidth = 0
         self.currentVideoHeight = 0
+        self.displacementIntervalFrameCount = 5
+
+        # 超速行为相关参数
+        self.rashRelatedParaOne = 0.003
+        self.rashRelatedParaTwo = 8
+
+
+        # 暂存信息的属性
+        self.tempRecordDisplacement = {}
+        self.tempRecordDispSpeed = {}
+        self.tempRecordRashTwoCount = {}
+        self.tempRecordRashStatusList = []
+
+    def get_nth_last_from_dict(self, dictionary, n):
+        """
+        获取字典倒数第n个元素
+
+        参数:
+            dictionary: 字典
+            n: 倒数第n个（1表示最后一个，2表示倒数第二个...）
+
+        返回:
+            (key, value) 元组，如果不存在返回None
+        """
+        if not dictionary or len(dictionary) < n:
+            return None
+
+        # 将字典项转换为列表
+        items_list = list(dictionary.items())
+        # 获取倒数第n个
+        return items_list[-n]
+
+    def euclidean_distance(self, point1, point2):
+        """计算两个点之间的欧几里得距离。
+
+        参数:
+        point1: tuple, 第一个点的坐标 (x1, y1)
+        point2: tuple, 第二个点的坐标 (x2, y2)
+
+        返回:
+        float, 欧几里得距离
+
+        """
+        x1 = point1[0]
+        y1 = point1[1]
+        x2 = point2[0]
+        y2 = point2[1]
+        distance = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        return distance
 
     def get_basic_info(self, basicInfo):
+
         if basicInfo[0] not in self.historyBasicInfo:
             self.historyBasicInfo[basicInfo[0]] = []
             # 换摄像头了
             self.basedFrameCountInfo = {}
             self.currentVideoWidth = basicInfo[-2]
             self.currentVideoHeight = basicInfo[-1]
+            self.tempRecordRashTwoCount = {}
         self.historyBasicInfo[basicInfo[0]].append(copy.deepcopy(basicInfo))
         # 处理与清晰数据等
         if f"{basicInfo[-3]}" not in self.basedFrameCountInfo:
@@ -112,10 +163,56 @@ class BiLSTMTransformer:
 
     # 计算目标基于像素的特定帧数的过去的位移
     def calculate_frame_pixel_displacement(self):
-        pass
+        if self.basedFrameCountInfo and len(self.basedFrameCountInfo) >= self.displacementIntervalFrameCount:
+            theLastOneData = self.get_nth_last_from_dict(self.basedFrameCountInfo, 1)
+            intervalData = self.get_nth_last_from_dict(self.basedFrameCountInfo, self.displacementIntervalFrameCount)
+            # 计算位移差值
+            for i in range(len(theLastOneData[1])):
+                # 查找相同ID,并计算位移
+                for j in range(len(intervalData[1])):
+                    if theLastOneData[1][i][0] == intervalData[1][j][0]:
+                        centerPointOne = ((theLastOneData[1][i][3] - theLastOneData[1][i][1])/self.currentVideoWidth, (theLastOneData[1][i][4] - theLastOneData[1][i][2])/self.currentVideoHeight)
+                        centerPointTwo = ((intervalData[1][i][3] - intervalData[1][i][1])/self.currentVideoWidth, (intervalData[1][i][4] - intervalData[1][i][2])/self.currentVideoHeight)
+                        displacementValue = self.euclidean_distance(centerPointOne, centerPointTwo)
+                        self.tempRecordDisplacement[f"{theLastOneData[1][i][0]}"] = displacementValue
+
+
+    # 计算目标基于像素位移当前的大致速率
+    def calculate_current_displacement_speed(self):
+        if self.tempRecordDisplacement:
+            for key, value in self.tempRecordDisplacement.items():
+                self.tempRecordDispSpeed[key] = value / self.displacementIntervalFrameCount
+
 
     # 数据预处理与准备
     def data_preprocess_preparation(self):
+        # 重置暂存信息相关属性
+        self.tempRecordDisplacement = {}
+        self.tempRecordDispSpeed = {}
+        self.tempRecordRashStatusList = []
+
+
+
         # 计算目标基于像素的特定帧数的过去的位移
         self.calculate_frame_pixel_displacement()
+
+        # 计算目标基于像素位移当前的大致速率
+        self.calculate_current_displacement_speed()
+
+    # 进行行为的判别
+    def conduct_behavior_assessment(self):
+        if self.tempRecordDispSpeed:
+            for key, value in self.tempRecordDispSpeed.items():
+                if value > self.rashRelatedParaOne:
+                    if f"{key}" not in self.tempRecordRashTwoCount:
+                        self.tempRecordRashTwoCount[f"{key}"] = 0
+                    self.tempRecordRashTwoCount[f"{key}"] += 1
+            # 挑选第一轮的超速候选ID
+            for key, value in self.tempRecordRashTwoCount.items():
+                if value > self.rashRelatedParaTwo:
+                    self.tempRecordRashStatusList.append(key)
+
+            print(self.tempRecordRashStatusList)
+
+            # 接下来取出候选超速列表中的id进行进一步确认处理
 
