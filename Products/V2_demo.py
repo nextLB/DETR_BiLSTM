@@ -214,8 +214,10 @@ def vision_inference_thread(visualBasicInfoQueue, determinateBasicInfoQueue, ima
             currentFrameCount = 0
             for result in results:
                 currentFrameCount += 1
-                print(f'currentFrameCount: {currentFrameCount}')
                 imageQueue.put(result.orig_img.copy())
+                imageHeight, imageWidth = result.orig_img.shape[:2]
+                print(f'currentFrameCount: {currentFrameCount}')
+                print(f"Window created with size: {imageWidth}x{imageHeight}")
                 if hasattr(result, 'boxes') and result.boxes is not None:
                     boxes = result.boxes.cpu().numpy()
                     if hasattr(boxes, 'id') and boxes.id is not None:
@@ -229,7 +231,7 @@ def vision_inference_thread(visualBasicInfoQueue, determinateBasicInfoQueue, ima
                             # 获取追踪ID
                             trackId = int(box.id[0])
                             visualBasicInfoQueue.put((videoNames[i], className, trackId, float(x1), float(y1), float(x2), float(y2), confidence, currentFrameCount))
-                            determinateBasicInfoQueue.put((videoNames[i], className, trackId, float(x1), float(y1), float(x2), float(y2), confidence, currentFrameCount))
+                            determinateBasicInfoQueue.put((videoNames[i], className, trackId, float(x1), float(y1), float(x2), float(y2), confidence, currentFrameCount, imageWidth, imageHeight))
                 time.sleep(0.1)
         i += 1
         time.sleep(1)
@@ -262,7 +264,7 @@ def visual_track_result_thread(visualBasicInfoQueue, imageQueue):
                 # 获取图像尺寸并设置窗口大小
                 imageHeight, imageWidth = imageData.shape[:2]
                 cv2.resizeWindow(windowName, imageWidth, imageHeight)
-                print(f"Window created with size: {imageWidth}x{imageHeight}")
+
             else:
                 # 如果更换视频了
                 if nowVideoName != basicInfo[0]:
@@ -275,7 +277,7 @@ def visual_track_result_thread(visualBasicInfoQueue, imageQueue):
                     # 获取图像尺寸并设置窗口大小
                     imageHeight, imageWidth = imageData.shape[:2]
                     cv2.resizeWindow(windowName, imageWidth, imageHeight)
-                    print(f"Window created with size: {imageWidth}x{imageHeight}")
+
 
             # 绘制相关检测信息
             # 调用绘制函数
@@ -310,9 +312,13 @@ def determinate_vehicle_behavior_thread(determinateBasicInfoQueue):
     while True:
         while not determinateBasicInfoQueue.empty():
             basicInfo = determinateBasicInfoQueue.get()
+            # 将数据信息传入到判别算法实例中
+            BiLSTMTransformerInstance.get_basic_info(basicInfo)
 
-        # 将数据信息传入到判别算法实例中
+        if basicInfo:
+            pass
 
+        basicInfo = None
         time.sleep(0.01)
 
 

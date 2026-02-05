@@ -1,6 +1,8 @@
 
 import torch
 import torch.nn as nn
+import copy
+
 
 # 3. BiLSTM+Transformer模型
 class noBiLSTMTransformer(nn.Module):
@@ -90,5 +92,22 @@ class noBiLSTMTransformer(nn.Module):
 class BiLSTMTransformer:
     def __init__(self):
         self.name = 'BiLSTMTransformer'
+        self.historyBasicInfo = {}
+        self.basedFrameCountInfo = {}
+        self.currentVideoWidth = 0
+        self.currentVideoHeight = 0
 
+    def get_basic_info(self, basicInfo):
+        if basicInfo[0] not in self.historyBasicInfo:
+            self.historyBasicInfo[basicInfo[0]] = []
+            # 换摄像头了
+            self.basedFrameCountInfo = {}
+            self.currentVideoWidth = basicInfo[-2]
+            self.currentVideoHeight = basicInfo[-1]
+        self.historyBasicInfo[basicInfo[0]].append(copy.deepcopy(basicInfo))
+        # 处理与清晰数据等
+        if f"{basicInfo[-3]}" not in self.basedFrameCountInfo:
+            self.basedFrameCountInfo[f"{basicInfo[-3]}"] = []
+        self.basedFrameCountInfo[f"{basicInfo[-3]}"].append(copy.deepcopy((basicInfo[2], basicInfo[3], basicInfo[4], basicInfo[5], basicInfo[6], basicInfo[7])))
+        print(self.basedFrameCountInfo[f"{basicInfo[-3]}"])
 
