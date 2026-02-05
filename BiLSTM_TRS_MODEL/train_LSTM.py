@@ -1,3 +1,4 @@
+
 import json
 import os
 import numpy as np
@@ -5,16 +6,20 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, f1_score
 import matplotlib.pyplot as plt
 from collections import Counter
 import warnings
+import random
+from tqdm import tqdm
+from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings('ignore')
 
 # 设置随机种子
 torch.manual_seed(42)
 np.random.seed(42)
+random.seed(42)
 
 # 定义设备
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -22,9 +27,9 @@ print(f"Using device: {device}")
 
 
 class VehicleTrajectoryDataset(Dataset):
-    """车辆轨迹数据集类"""
+    """改进的车辆轨迹数据集类，包含数据增强和更好的特征工程"""
 
-    def __init__(self, data_dir, label_dir, max_seq_len=100):
+    def __init__(self, data_dir, label_dir, max_seq_len=100, augment=False):
         """
         初始化数据集
 
@@ -32,24 +37,31 @@ class VehicleTrajectoryDataset(Dataset):
             data_dir: 数据文件目录
             label_dir: 标签文件目录
             max_seq_len: 最大序列长度（填充/截断）
+            augment: 是否使用数据增强
         """
         self.data_dir = data_dir
         self.label_dir = label_dir
         self.max_seq_len = max_seq_len
+        self.augment = augment
         self.sequences = []
         self.labels = []
         self.sequence_lengths = []
+        self.feature_scaler = StandardScaler()
 
         # 获取所有数据文件
         data_files = [f for f in os.listdir(data_dir) if f.endswith('_extract_data.json')]
+        data_files.sort()
 
-        for data_file in data_files:
+        all_trajectories = []
+        all_labels = []
+        all_lengths = []
+
+        for data_file in tqdm(data_files, desc="Loading data files"):
             # 构建对应的标签文件名
             base_name = data_file.replace('_extract_data.json', '')
             label_file = f"{base_name}_label.txt"
 
             if not os.path.exists(os.path.join(label_dir, label_file)):
-                print(f"Warning: Label file {label_file} not found for {data_file}")
                 continue
 
             # 加载数据
@@ -63,9 +75,6 @@ class VehicleTrajectoryDataset(Dataset):
                 label_lines = f.readlines()
 
             # 解析标签文件
-            # 第一行: fps,30
-            # 第二行: 1280,720
-            # 后续行: id,label
             label_dict = {}
             for line in label_lines[2:]:
                 line = line.strip()
@@ -74,100 +83,206 @@ class VehicleTrajectoryDataset(Dataset):
                     if len(parts) >= 2:
                         vehicle_id = parts[0]
                         label_str = parts[1].lower()
-                        # 将标签映射为数字
                         if label_str == 'rash':
                             label = 1
                         elif label_str == 'accident':
                             label = 2
                         else:
-                            label = 0  # 其他情况设为正常
+                            label = 0
                         label_dict[vehicle_id] = label
 
             # 处理每个车辆的轨迹
             for vehicle_id, trajectory in data.items():
                 # 跳过第一个[-1,-1,-1,-1,-1]
-                if len(trajectory) < 2:
+                if len(trajectory) < 3:
                     continue
 
                 # 提取轨迹点（跳过第一个-1数组）
                 traj_points = []
                 for point in trajectory[1:]:
                     if isinstance(point, list) and len(point) >= 4:
-                        # 只取前4个值：x1, y1, x2, y2
                         x1, y1, x2, y2 = point[:4]
-                        # 计算边界框中心点、宽度、高度
                         center_x = (x1 + x2) / 2
                         center_y = (y1 + y2) / 2
                         width = x2 - x1
                         height = y2 - y1
-                        # 添加速度和加速度特征（使用相邻帧计算）
                         traj_points.append([center_x, center_y, width, height])
 
-                if len(traj_points) < 3:  # 太短的序列跳过
+                if len(traj_points) < 5:  # 增加最小序列长度要求
                     continue
 
-                # 计算速度特征
-                traj_with_features = self._add_motion_features(traj_points)
+                # 添加丰富的运动特征
+                traj_with_features = self._add_rich_features(traj_points)
 
-                # 截断或填充序列
-                if len(traj_with_features) > self.max_seq_len:
-                    traj_with_features = traj_with_features[:self.max_seq_len]
-                else:
-                    # 填充
-                    padding = [[0, 0, 0, 0, 0, 0]] * (self.max_seq_len - len(traj_with_features))
-                    traj_with_features.extend(padding)
-
-                # 获取标签（默认为0 - 正常）
+                # 获取标签
                 label = label_dict.get(vehicle_id, 0)
 
-                self.sequences.append(traj_with_features)
-                self.labels.append(label)
-                self.sequence_lengths.append(min(len(traj_points), self.max_seq_len))
+                all_trajectories.append(traj_with_features)
+                all_labels.append(label)
+                all_lengths.append(len(traj_with_features))
 
-        # 转换为numpy数组
+                # 数据增强：生成变体
+                if self.augment and len(traj_points) > 10:
+                    # 1. 轻微扰动
+                    perturbed = self._augment_perturb(traj_with_features.copy())
+                    all_trajectories.append(perturbed)
+                    all_labels.append(label)
+                    all_lengths.append(len(perturbed))
+
+                    # 2. 时间缩放
+                    scaled = self._augment_temporal_scale(traj_with_features.copy())
+                    all_trajectories.append(scaled)
+                    all_labels.append(label)
+                    all_lengths.append(len(scaled))
+
+        # 特征归一化
+        self._fit_feature_scaler(all_trajectories)
+
+        for traj in all_trajectories:
+            # 截断或填充序列
+            if len(traj) > self.max_seq_len:
+                traj = traj[:self.max_seq_len]
+                seq_len = self.max_seq_len
+            else:
+                padding = [[0] * traj[0].shape[0]] * (self.max_seq_len - len(traj))
+                traj.extend(padding)
+                seq_len = len(traj)
+
+            # 归一化特征
+            traj_norm = self.feature_scaler.transform(traj)
+            self.sequences.append(traj_norm)
+            self.sequence_lengths.append(seq_len)
+
+        self.labels = np.array(all_labels, dtype=np.int64)
         self.sequences = np.array(self.sequences, dtype=np.float32)
-        self.labels = np.array(self.labels, dtype=np.int64)
         self.sequence_lengths = np.array(self.sequence_lengths, dtype=np.int64)
 
-        print(f"Dataset loaded: {len(self.sequences)} sequences")
+        print(f"\nDataset loaded: {len(self.sequences)} sequences")
         print(f"Class distribution: {Counter(self.labels)}")
+        print(f"Feature dimension: {self.sequences[0].shape[1]}")
 
-    def _add_motion_features(self, traj_points):
-        """添加运动特征（速度和加速度）"""
+    def _fit_feature_scaler(self, trajectories):
+        """拟合特征标准化器"""
+        all_features = []
+        for traj in trajectories:
+            all_features.extend(traj)
+        self.feature_scaler.fit(all_features)
+
+    def _add_rich_features(self, traj_points):
+        """添加丰富的运动特征"""
         traj_with_features = []
 
         for i in range(len(traj_points)):
+            # 基本位置特征
+            center_x, center_y, width, height = traj_points[i]
+
+            # 计算速度
             if i == 0:
-                # 第一帧，速度为0
                 vx, vy = 0, 0
-                ax, ay = 0, 0
+                speed = 0
+                direction = 0
             else:
-                # 计算速度（位置变化）
                 vx = traj_points[i][0] - traj_points[i - 1][0]
                 vy = traj_points[i][1] - traj_points[i - 1][1]
+                speed = np.sqrt(vx ** 2 + vy ** 2)
+                direction = np.arctan2(vy, vx) if speed > 0 else 0
 
-                if i == 1:
-                    # 第二帧，加速度为0
-                    ax, ay = 0, 0
-                else:
-                    # 计算加速度（速度变化）
-                    prev_vx = traj_points[i - 1][0] - traj_points[i - 2][0]
-                    prev_vy = traj_points[i - 1][1] - traj_points[i - 2][1]
-                    ax = vx - prev_vx
-                    ay = vy - prev_vy
+            # 计算加速度
+            if i <= 1:
+                ax, ay = 0, 0
+                accel = 0
+            else:
+                prev_vx = traj_points[i - 1][0] - traj_points[i - 2][0]
+                prev_vy = traj_points[i - 1][1] - traj_points[i - 2][1]
+                ax = vx - prev_vx
+                ay = vy - prev_vy
+                accel = np.sqrt(ax ** 2 + ay ** 2)
 
-            # 组合特征：[中心x, 中心y, 宽度, 高度, 速度x, 速度y]
-            features = [
-                traj_points[i][0],  # center_x
-                traj_points[i][1],  # center_y
-                traj_points[i][2],  # width
-                traj_points[i][3],  # height
-                vx,  # velocity_x
-                vy  # velocity_y
-            ]
+            # 计算jerk（加速度的变化率）
+            if i <= 2:
+                jerk = 0
+            else:
+                prev_ax = (traj_points[i - 1][0] - traj_points[i - 2][0]) - (
+                            traj_points[i - 2][0] - traj_points[i - 3][0])
+                prev_ay = (traj_points[i - 1][1] - traj_points[i - 2][1]) - (
+                            traj_points[i - 2][1] - traj_points[i - 3][1])
+                jerk_x = ax - prev_ax
+                jerk_y = ay - prev_ay
+                jerk = np.sqrt(jerk_x ** 2 + jerk_y ** 2)
+
+            # 边界框变化率
+            if i == 0:
+                width_change = 0
+                height_change = 0
+            else:
+                width_change = width - traj_points[i - 1][2]
+                height_change = height - traj_points[i - 1][3]
+
+            # 计算曲率（方向变化率）
+            if i <= 1:
+                curvature = 0
+            else:
+                prev_direction = np.arctan2(
+                    traj_points[i - 1][1] - traj_points[i - 2][1],
+                    traj_points[i - 1][0] - traj_points[i - 2][0]
+                ) if i > 1 else 0
+                curvature = direction - prev_direction
+
+            # 组合特征
+            features = np.array([
+                center_x, center_y,  # 位置
+                width, height,  # 尺寸
+                vx, vy,  # 速度分量
+                speed,  # 速度大小
+                direction,  # 运动方向
+                ax, ay,  # 加速度分量
+                accel,  # 加速度大小
+                jerk,  # jerk
+                width_change, height_change,  # 尺寸变化
+                curvature,  # 曲率
+                width / height if height > 0 else 1,  # 宽高比
+                np.log(speed + 1e-6)  # 对数速度
+            ], dtype=np.float32)
+
             traj_with_features.append(features)
 
         return traj_with_features
+
+    def _augment_perturb(self, trajectory):
+        """数据增强：添加轻微扰动"""
+        perturbed = []
+        for point in trajectory:
+            noise = np.random.normal(0, 0.01, point.shape)
+            perturbed.append(point + noise)
+        return perturbed
+
+    def _augment_temporal_scale(self, trajectory):
+        """数据增强：时间缩放"""
+        if len(trajectory) <= 10:
+            return trajectory
+
+        scale = random.uniform(0.8, 1.2)
+        new_length = max(5, int(len(trajectory) * scale))
+
+        if new_length > len(trajectory):
+            # 上采样：插值
+            indices = np.linspace(0, len(trajectory) - 1, new_length)
+            scaled = []
+            for idx in indices:
+                idx_floor = int(np.floor(idx))
+                idx_ceil = min(int(np.ceil(idx)), len(trajectory) - 1)
+                weight = idx - idx_floor
+
+                if idx_floor == idx_ceil:
+                    scaled.append(trajectory[idx_floor])
+                else:
+                    interpolated = (1 - weight) * trajectory[idx_floor] + weight * trajectory[idx_ceil]
+                    scaled.append(interpolated)
+            return scaled
+        else:
+            # 下采样：均匀采样
+            indices = np.linspace(0, len(trajectory) - 1, new_length, dtype=int)
+            return [trajectory[i] for i in indices]
 
     def __len__(self):
         return len(self.sequences)
@@ -180,11 +295,11 @@ class VehicleTrajectoryDataset(Dataset):
         )
 
 
-class LSTMModel(nn.Module):
-    """LSTM车辆行为识别模型"""
+class EnhancedLSTMModel(nn.Module):
+    """增强的LSTM车辆行为识别模型"""
 
-    def __init__(self, input_dim=6, hidden_dim=128, num_layers=2, num_classes=3, dropout=0.3):
-        super(LSTMModel, self).__init__()
+    def __init__(self, input_dim=17, hidden_dim=256, num_layers=3, num_classes=3, dropout=0.4):
+        super(EnhancedLSTMModel, self).__init__()
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -198,20 +313,39 @@ class LSTMModel(nn.Module):
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0,
-            bidirectional=True  # 使用双向LSTM捕获前后信息
+            bidirectional=True,
+            proj_size=0
         )
 
-        # 注意力机制
+        # 多层注意力机制
         self.attention = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.Tanh(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim // 2, 1)
+        )
+
+        # 时间特征提取器
+        self.time_conv = nn.Sequential(
+            nn.Conv1d(hidden_dim * 2, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Conv1d(hidden_dim, hidden_dim // 2, kernel_size=3, padding=1),
+            nn.BatchNorm1d(hidden_dim // 2),
+            nn.ReLU(),
         )
 
         # 分类器
         self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim * 2 + hidden_dim // 2, hidden_dim * 2),
+            nn.LayerNorm(hidden_dim * 2),
+            nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -224,18 +358,30 @@ class LSTMModel(nn.Module):
 
     def _init_weights(self):
         for name, param in self.lstm.named_parameters():
-            if 'weight' in name:
-                nn.init.xavier_normal_(param)
+            if 'weight_ih' in name:
+                nn.init.xavier_uniform_(param.data)
+            elif 'weight_hh' in name:
+                nn.init.orthogonal_(param.data)
             elif 'bias' in name:
-                nn.init.constant_(param, 0)
+                nn.init.constant_(param.data, 0)
+                # 设置遗忘门偏置为1
+                if len(param.shape) > 1:
+                    n = param.size(0)
+                    param.data[n // 4:n // 2].fill_(1.0)
 
-        for m in self.classifier:
+        for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_normal_(m.weight)
-                nn.init.constant_(m.bias, 0)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
     def forward(self, x, lengths):
         batch_size = x.size(0)
+        seq_len = x.size(1)
 
         # 打包序列以处理变长序列
         packed_input = nn.utils.rnn.pack_padded_sequence(
@@ -249,23 +395,35 @@ class LSTMModel(nn.Module):
         output, _ = nn.utils.rnn.pad_packed_sequence(packed_output, batch_first=True)
 
         # 注意力机制
-        attention_weights = torch.softmax(self.attention(output), dim=1)
+        attention_weights = torch.softmax(self.attention(output).squeeze(-1), dim=1)
+        attention_weights = attention_weights.unsqueeze(-1)
         context_vector = torch.sum(attention_weights * output, dim=1)
 
+        # 时间卷积特征提取
+        output_transposed = output.transpose(1, 2)
+        time_features = self.time_conv(output_transposed)
+        pooled_time_features = nn.functional.adaptive_avg_pool1d(time_features, 1).squeeze(-1)
+
+        # 组合特征
+        combined_features = torch.cat([context_vector, pooled_time_features], dim=1)
+
         # 分类
-        logits = self.classifier(context_vector)
+        logits = self.classifier(combined_features)
 
-        return logits
+        return logits, attention_weights.squeeze(-1)
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device):
+def train_epoch(model, dataloader, criterion, optimizer, device, grad_clip=1.0):
     """训练一个epoch"""
     model.train()
     total_loss = 0
     correct = 0
     total = 0
+    all_predictions = []
+    all_labels = []
 
-    for batch_idx, (sequences, labels, lengths) in enumerate(dataloader):
+    pbar = tqdm(dataloader, desc="Training", leave=False)
+    for batch_idx, (sequences, labels, lengths) in enumerate(pbar):
         sequences = sequences.to(device)
         labels = labels.to(device)
         lengths = lengths.to(device)
@@ -273,12 +431,15 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         optimizer.zero_grad()
 
         # 前向传播
-        outputs = model(sequences, lengths)
+        outputs, _ = model(sequences, lengths)
         loss = criterion(outputs, labels)
 
         # 反向传播
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪
+
+        # 梯度裁剪
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+
         optimizer.step()
 
         total_loss += loss.item()
@@ -286,13 +447,20 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
 
-        if batch_idx % 50 == 0:
-            print(f'  Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
+        all_predictions.extend(predicted.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+
+        # 更新进度条
+        pbar.set_postfix({
+            'loss': f'{loss.item():.4f}',
+            'acc': f'{100 * (predicted == labels).sum().item() / labels.size(0):.2f}%'
+        })
 
     avg_loss = total_loss / len(dataloader)
     accuracy = 100 * correct / total
+    f1 = f1_score(all_labels, all_predictions, average='weighted')
 
-    return avg_loss, accuracy
+    return avg_loss, accuracy, f1
 
 
 def evaluate(model, dataloader, criterion, device):
@@ -304,55 +472,105 @@ def evaluate(model, dataloader, criterion, device):
 
     all_predictions = []
     all_labels = []
+    all_confidences = []
 
     with torch.no_grad():
-        for sequences, labels, lengths in dataloader:
+        pbar = tqdm(dataloader, desc="Evaluating", leave=False)
+        for sequences, labels, lengths in pbar:
             sequences = sequences.to(device)
             labels = labels.to(device)
             lengths = lengths.to(device)
 
-            outputs = model(sequences, lengths)
+            outputs, _ = model(sequences, lengths)
             loss = criterion(outputs, labels)
 
             total_loss += loss.item()
             _, predicted = torch.max(outputs.data, 1)
+            probabilities = torch.softmax(outputs, dim=1)
+
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
             all_predictions.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+            all_confidences.extend(probabilities.max(dim=1)[0].cpu().numpy())
 
     avg_loss = total_loss / len(dataloader)
     accuracy = 100 * correct / total
+    f1 = f1_score(all_labels, all_predictions, average='weighted')
 
-    return avg_loss, accuracy, all_predictions, all_labels
+    return avg_loss, accuracy, f1, all_predictions, all_labels, all_confidences
 
 
-def plot_training_history(train_losses, val_losses, train_accs, val_accs):
+def plot_training_history(train_losses, val_losses, train_accs, val_accs, train_f1s, val_f1s):
     """绘制训练历史"""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 4))
 
     # 损失曲线
-    ax1.plot(train_losses, label='Train Loss')
-    ax1.plot(val_losses, label='Validation Loss')
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Loss')
-    ax1.set_title('Training and Validation Loss')
-    ax1.legend()
-    ax1.grid(True)
+    axes[0].plot(train_losses, label='Train Loss', linewidth=2)
+    axes[0].plot(val_losses, label='Validation Loss', linewidth=2)
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Loss')
+    axes[0].set_title('Training and Validation Loss')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    axes[0].set_yscale('log')
 
     # 准确率曲线
-    ax2.plot(train_accs, label='Train Accuracy')
-    ax2.plot(val_accs, label='Validation Accuracy')
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Accuracy (%)')
-    ax2.set_title('Training and Validation Accuracy')
-    ax2.legend()
-    ax2.grid(True)
+    axes[1].plot(train_accs, label='Train Accuracy', linewidth=2)
+    axes[1].plot(val_accs, label='Validation Accuracy', linewidth=2)
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Accuracy (%)')
+    axes[1].set_title('Training and Validation Accuracy')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+    axes[1].set_ylim(0, 105)
+
+    # F1分数曲线
+    axes[2].plot(train_f1s, label='Train F1 Score', linewidth=2)
+    axes[2].plot(val_f1s, label='Validation F1 Score', linewidth=2)
+    axes[2].set_xlabel('Epoch')
+    axes[2].set_ylabel('F1 Score')
+    axes[2].set_title('Training and Validation F1 Score')
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
+    axes[2].set_ylim(0, 1)
 
     plt.tight_layout()
-    plt.savefig('training_history.png')
-    print("Training history saved as 'training_history.png'")
+    plt.savefig('training_history_improved.png', dpi=150, bbox_inches='tight')
+    print("Training history saved as 'training_history_improved.png'")
+    plt.close()
+
+
+def plot_confusion_matrix(cm, class_names):
+    """绘制混淆矩阵"""
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    im = ax.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    ax.figure.colorbar(im, ax=ax)
+
+    # 设置刻度标签
+    ax.set(xticks=np.arange(cm.shape[1]),
+           yticks=np.arange(cm.shape[0]),
+           xticklabels=class_names, yticklabels=class_names,
+           title='Confusion Matrix',
+           ylabel='True label',
+           xlabel='Predicted label')
+
+    # 旋转x轴标签
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+
+    # 在格子中显示数值
+    thresh = cm.max() / 2.
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, format(cm[i, j], 'd'),
+                    ha="center", va="center",
+                    color="white" if cm[i, j] > thresh else "black")
+
+    fig.tight_layout()
+    plt.savefig('confusion_matrix.png', dpi=150, bbox_inches='tight')
+    print("Confusion matrix saved as 'confusion_matrix.png'")
     plt.close()
 
 
@@ -361,28 +579,42 @@ def main():
     config = {
         'data_dir': '/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/BiLSTM_Transformer_data/train_data/',
         'label_dir': '/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/BiLSTM_Transformer_data/train_label/',
-        'max_seq_len': 100,  # 最大序列长度
-        'batch_size': 32,
-        'hidden_dim': 128,
-        'num_layers': 2,
-        'dropout': 0.3,
+        'max_seq_len': 100,
+        'batch_size': 64,
+        'hidden_dim': 256,
+        'num_layers': 3,
+        'dropout': 0.4,
         'learning_rate': 0.001,
-        'num_epochs': 50,
-        'model_type': 'lstm'  # 'lstm' 或 'gru'
+        'weight_decay': 1e-4,
+        'num_epochs': 100,
+        'patience': 15,
+        'min_lr': 1e-6,
+        'grad_clip': 1.0,
+        'augment': True
     }
 
+    print("=" * 60)
+    print("ENHANCED VEHICLE BEHAVIOR LSTM TRAINING")
+    print("=" * 60)
+
     # 创建数据集
-    print("Loading dataset...")
+    print("\nLoading dataset...")
     dataset = VehicleTrajectoryDataset(
         data_dir=config['data_dir'],
         label_dir=config['label_dir'],
-        max_seq_len=config['max_seq_len']
+        max_seq_len=config['max_seq_len'],
+        augment=config['augment']
     )
 
     # 数据集统计
-    print(f"Total samples: {len(dataset)}")
-    print(f"Sequence shape: {dataset.sequences[0].shape}")
-    print(f"Features per timestep: {dataset.sequences[0].shape[1]}")
+    print(f"\nDataset statistics:")
+    print(f"  Total samples: {len(dataset)}")
+    print(f"  Sequence shape: {dataset.sequences[0].shape}")
+    print(f"  Features per timestep: {dataset.sequences[0].shape[1]}")
+
+    class_counts = Counter(dataset.labels)
+    for i, class_name in enumerate(['Normal', 'Rash', 'Accident']):
+        print(f"  {class_name}: {class_counts.get(i, 0)} samples")
 
     # 分割数据集（80%训练，10%验证，10%测试）
     total_size = len(dataset)
@@ -391,7 +623,8 @@ def main():
     test_size = total_size - train_size - val_size
 
     train_dataset, val_dataset, test_dataset = random_split(
-        dataset, [train_size, val_size, test_size]
+        dataset, [train_size, val_size, test_size],
+        generator=torch.Generator().manual_seed(42)
     )
 
     print(f"\nDataset split:")
@@ -401,34 +634,39 @@ def main():
 
     # 创建数据加载器
     train_loader = DataLoader(
-        train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=2
+        train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=4, pin_memory=True
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=2
+        val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4, pin_memory=True
     )
     test_loader = DataLoader(
-        test_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=2
+        test_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4, pin_memory=True
     )
 
     # 创建模型
-    input_dim = dataset.sequences[0].shape[1]  # 特征维度
+    input_dim = dataset.sequences[0].shape[1]
 
-    if config['model_type'] == 'lstm':
-        model = LSTMModel(
-            input_dim=input_dim,
-            hidden_dim=config['hidden_dim'],
-            num_layers=config['num_layers'],
-            num_classes=3,
-            dropout=config['dropout']
-        )
-    else:
-        # 如果需要GRU模型，这里可以添加
-        pass
+    print(f"\nCreating enhanced LSTM model...")
+    print(f"  Input dimension: {input_dim}")
+    print(f"  Hidden dimension: {config['hidden_dim']}")
+    print(f"  Number of layers: {config['num_layers']}")
+
+    model = EnhancedLSTMModel(
+        input_dim=input_dim,
+        hidden_dim=config['hidden_dim'],
+        num_layers=config['num_layers'],
+        num_classes=3,
+        dropout=config['dropout']
+    )
 
     model = model.to(device)
-    print(f"\nModel architecture ({config['model_type'].upper()}):")
-    print(model)
-    print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    print(f"\nModel architecture:")
+    print(f"  Total parameters: {total_params:,}")
+    print(f"  Trainable parameters: {trainable_params:,}")
 
     # 定义损失函数和优化器
     # 计算类别权重以处理不平衡数据
@@ -439,35 +677,62 @@ def main():
         for i in range(3)
     ], dtype=torch.float32).to(device)
 
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+    print(f"\nClass weights: {class_weights.cpu().numpy()}")
 
-    # 修改：去掉verbose参数
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=config['learning_rate'],
+        weight_decay=config['weight_decay'],
+        betas=(0.9, 0.999)
     )
+
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=config['patience'],
+         min_lr=config['min_lr']
+    )
+
+    # 添加warmup调度器
+    warmup_epochs = 5
+
+    def warmup_scheduler(epoch):
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs
+        else:
+            return 1.0
 
     # 训练循环
     print(f"\nStarting training for {config['num_epochs']} epochs...")
+    print("=" * 60)
 
     train_losses = []
     train_accuracies = []
+    train_f1s = []
     val_losses = []
     val_accuracies = []
+    val_f1s = []
 
-    best_val_accuracy = 0
+    best_val_f1 = 0
+    best_epoch = 0
     best_model_state = None
+    patience_counter = 0
 
     for epoch in range(config['num_epochs']):
         print(f"\nEpoch {epoch + 1}/{config['num_epochs']}")
 
+        # Warmup学习率调整
+        if epoch < warmup_epochs:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = config['learning_rate'] * warmup_scheduler(epoch)
+
         # 训练阶段
-        train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, device
+        train_loss, train_acc, train_f1 = train_epoch(
+            model, train_loader, criterion, optimizer, device, config['grad_clip']
         )
 
         # 验证阶段
-        val_loss, val_acc, _, _ = evaluate(
+        val_loss, val_acc, val_f1, _, _, _ = evaluate(
             model, val_loader, criterion, device
         )
 
@@ -477,686 +742,144 @@ def main():
         # 保存记录
         train_losses.append(train_loss)
         train_accuracies.append(train_acc)
+        train_f1s.append(train_f1)
         val_losses.append(val_loss)
         val_accuracies.append(val_acc)
+        val_f1s.append(val_f1)
 
-        print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
-        print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+        print(f"Train - Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%, F1: {train_f1:.4f}")
+        print(f"Val   - Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%, F1: {val_f1:.4f}")
+        print(f"LR: {optimizer.param_groups[0]['lr']:.6f}")
 
         # 保存最佳模型
-        if val_acc > best_val_accuracy:
-            best_val_accuracy = val_acc
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            best_epoch = epoch
             best_model_state = model.state_dict().copy()
+            patience_counter = 0
+
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': best_model_state,
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_accuracy': best_val_accuracy,
+                'val_f1': best_val_f1,
+                'val_accuracy': val_acc,
+                'config': config,
+                'input_dim': input_dim,
+                'class_names': ['Normal', 'Rash', 'Accident'],
+                'feature_scaler': dataset.feature_scaler
+            }, 'best_vehicle_behavior_model_improved.pth')
+
+            print(f"  ✓ New best model saved with validation F1: {best_val_f1:.4f}")
+        else:
+            patience_counter += 1
+            print(f"  Patience: {patience_counter}/{config['patience'] + 5}")
+
+        # 早停检查
+        if patience_counter >= config['patience'] + 5:
+            print(f"\nEarly stopping triggered at epoch {epoch + 1}")
+            break
+
+        # 每10个epoch保存一次中间模型
+        if (epoch + 1) % 10 == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_f1': val_f1,
                 'config': config
-            }, 'best_vehicle_behavior_model.pth')
-            print(f"  New best model saved with validation accuracy: {best_val_accuracy:.2f}%")
+            }, f'checkpoint_epoch_{epoch + 1}.pth')
 
     # 绘制训练历史
-    plot_training_history(train_losses, val_losses, train_accuracies, val_accuracies)
+    plot_training_history(train_losses, val_losses, train_accuracies, val_accuracies, train_f1s, val_f1s)
 
     # 加载最佳模型进行测试
-    print("\nLoading best model for testing...")
+    print(f"\nLoading best model from epoch {best_epoch + 1} for testing...")
     model.load_state_dict(best_model_state)
 
     # 在测试集上评估
-    test_loss, test_acc, test_predictions, test_labels = evaluate(
+    test_loss, test_acc, test_f1, test_predictions, test_labels, test_confidences = evaluate(
         model, test_loader, criterion, device
     )
 
-    print(f"\nTest Results:")
+    print(f"\n" + "=" * 60)
+    print("TEST RESULTS")
+    print("=" * 60)
     print(f"  Loss: {test_loss:.4f}")
     print(f"  Accuracy: {test_acc:.2f}%")
+    print(f"  F1 Score: {test_f1:.4f}")
+
+    # 计算每个类别的准确率
+    from sklearn.metrics import precision_recall_fscore_support
+    precision, recall, f1_scores, support = precision_recall_fscore_support(
+        test_labels, test_predictions, labels=[0, 1, 2]
+    )
+
+    print(f"\nClass-wise performance:")
+    for i, class_name in enumerate(['Normal', 'Rash', 'Accident']):
+        print(
+            f"  {class_name}: Precision={precision[i]:.3f}, Recall={recall[i]:.3f}, F1={f1_scores[i]:.3f}, Support={support[i]}")
 
     # 分类报告
-    print("\nClassification Report:")
+    print(f"\nDetailed Classification Report:")
     print(classification_report(
         test_labels, test_predictions,
-        target_names=['Normal (0)', 'Rash (1)', 'Accident (2)']
+        target_names=['Normal', 'Rash', 'Accident'],
+        digits=3
     ))
 
     # 混淆矩阵
     cm = confusion_matrix(test_labels, test_predictions)
-    print("Confusion Matrix:")
+    print(f"Confusion Matrix:")
     print(cm)
+    plot_confusion_matrix(cm, ['Normal', 'Rash', 'Accident'])
 
     # 保存最终模型
+    final_model_path = 'vehicle_behavior_final_model_improved.pth'
     torch.save({
         'model_state_dict': model.state_dict(),
         'config': config,
         'input_dim': input_dim,
-        'class_names': ['Normal', 'Rash', 'Accident']
-    }, 'vehicle_behavior_final_model.pth')
+        'class_names': ['Normal', 'Rash', 'Accident'],
+        'feature_scaler': dataset.feature_scaler,
+        'test_metrics': {
+            'accuracy': test_acc,
+            'f1_score': test_f1,
+            'loss': test_loss
+        }
+    }, final_model_path)
 
-    print("\nModel saved as 'vehicle_behavior_final_model.pth'")
+    print(f"\nFinal model saved as '{final_model_path}'")
 
-    # 示例推理函数
-    def predict_single_trajectory(trajectory_points, model, device, max_seq_len=100):
-        """预测单个轨迹的行为"""
-        model.eval()
+    # 打印模型使用说明
+    print(f"\n" + "=" * 60)
+    print("MODEL USAGE INSTRUCTIONS")
+    print("=" * 60)
+    print("1. Use this model with 'inference_LSTM_improved.py' for inference")
+    print("2. Use with 'V1_demo_improved.py' for real-time behavior prediction")
+    print("3. Model expects {input_dim}-dimensional features")
+    print("4. Features should be normalized using the saved scaler")
 
-        # 预处理轨迹点
-        if len(trajectory_points) < 3:
-            return "轨迹太短，无法预测", 0.0
+    # 示例推理
+    print(f"\nExample prediction on a test sample:")
+    if len(test_dataset) > 0:
+        sample_sequence, sample_label, sample_length = test_dataset[0]
+        sample_sequence = sample_sequence.unsqueeze(0).to(device)
+        sample_length = sample_length.unsqueeze(0).to(device)
 
-        # 添加运动特征
-        traj_with_features = []
-        for i in range(len(trajectory_points)):
-            if i == 0:
-                vx, vy = 0, 0
-            else:
-                vx = trajectory_points[i][0] - trajectory_points[i - 1][0]
-                vy = trajectory_points[i][1] - trajectory_points[i - 1][1]
-
-            features = [
-                trajectory_points[i][0],  # center_x
-                trajectory_points[i][1],  # center_y
-                trajectory_points[i][2],  # width
-                trajectory_points[i][3],  # height
-                vx,  # velocity_x
-                vy  # velocity_y
-            ]
-            traj_with_features.append(features)
-
-        # 截断或填充
-        if len(traj_with_features) > max_seq_len:
-            traj_with_features = traj_with_features[:max_seq_len]
-        else:
-            padding = [[0, 0, 0, 0, 0, 0]] * (max_seq_len - len(traj_with_features))
-            traj_with_features.extend(padding)
-
-        # 转换为tensor
-        sequence = torch.FloatTensor([traj_with_features]).to(device)
-        length = torch.tensor([min(len(trajectory_points), max_seq_len)], dtype=torch.long).to(device)
-
-        # 预测
         with torch.no_grad():
-            outputs = model(sequence, length)
+            outputs, attention_weights = model(sample_sequence, sample_length)
             probabilities = torch.softmax(outputs, dim=1)
             predicted_class = torch.argmax(outputs, dim=1).item()
 
-        class_names = ['Normal', 'Rash', 'Accident']
-        confidence = probabilities[0][predicted_class].item()
-
-        return class_names[predicted_class], confidence
-
-    # 测试示例推理
-    print("\nExample prediction:")
-    if len(dataset) > 0:
-        sample_sequence = dataset.sequences[0][:10]  # 取前10个时间步
-        sample_points = [[seq[0], seq[1], seq[2], seq[3]] for seq in sample_sequence]
-
-        prediction, confidence = predict_single_trajectory(
-            sample_points, model, device, config['max_seq_len']
-        )
-        print(f"Predicted: {prediction} (confidence: {confidence:.2%})")
-        print(f"Actual label: {['Normal', 'Rash', 'Accident'][dataset.labels[0]]}")
+        print(f"  Predicted: {['Normal', 'Rash', 'Accident'][predicted_class]} "
+              f"(confidence: {probabilities[0][predicted_class]:.2%})")
+        print(f"  Actual: {['Normal', 'Rash', 'Accident'][sample_label]}")
 
 
 if __name__ == "__main__":
     main()
 
 
-# import json
-# import os
-# import numpy as np
-# import torch
-# import torch.nn as nn
-# import torch.optim as optim
-# from torch.utils.data import Dataset, DataLoader, random_split, WeightedRandomSampler
-# from sklearn.metrics import classification_report, confusion_matrix, precision_recall_fscore_support
-# from sklearn.utils.class_weight import compute_class_weight
-# import matplotlib.pyplot as plt
-# from collections import Counter
-# import warnings
-#
-# warnings.filterwarnings('ignore')
-#
-# # 设置随机种子
-# torch.manual_seed(42)
-# np.random.seed(42)
-#
-# # 定义设备
-# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-# print(f"Using device: {device}")
-#
-#
-# # 定义Focal Loss来处理类别不平衡
-# class FocalLoss(nn.Module):
-#     def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
-#         super(FocalLoss, self).__init__()
-#         self.gamma = gamma
-#         self.alpha = alpha
-#         self.reduction = reduction
-#
-#     def forward(self, inputs, targets):
-#         ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none')
-#         pt = torch.exp(-ce_loss)
-#         focal_loss = ((1 - pt) ** self.gamma) * ce_loss
-#
-#         if self.alpha is not None:
-#             alpha_t = self.alpha[targets]
-#             focal_loss = alpha_t * focal_loss
-#
-#         if self.reduction == 'mean':
-#             return focal_loss.mean()
-#         elif self.reduction == 'sum':
-#             return focal_loss.sum()
-#         else:
-#             return focal_loss
-#
-#
-# class VehicleTrajectoryDataset(Dataset):
-#     """改进的车辆轨迹数据集类，添加数据增强"""
-#
-#     def __init__(self, data_dir, label_dir, max_seq_len=100, augment=False):
-#         self.data_dir = data_dir
-#         self.label_dir = label_dir
-#         self.max_seq_len = max_seq_len
-#         self.augment = augment
-#         self.sequences = []
-#         self.labels = []
-#         self.sequence_lengths = []
-#
-#         # 获取所有数据文件
-#         data_files = [f for f in os.listdir(data_dir) if f.endswith('_extract_data.json')]
-#
-#         for data_file in data_files:
-#             base_name = data_file.replace('_extract_data.json', '')
-#             label_file = f"{base_name}_label.txt"
-#
-#             if not os.path.exists(os.path.join(label_dir, label_file)):
-#                 continue
-#
-#             # 加载数据
-#             data_path = os.path.join(data_dir, data_file)
-#             with open(data_path, 'r') as f:
-#                 data = json.load(f)
-#
-#             # 加载标签
-#             label_path = os.path.join(label_dir, label_file)
-#             with open(label_path, 'r') as f:
-#                 label_lines = f.readlines()
-#
-#             # 解析标签文件
-#             label_dict = {}
-#             for line in label_lines[2:]:
-#                 line = line.strip()
-#                 if line:
-#                     parts = line.split(',')
-#                     if len(parts) >= 2:
-#                         vehicle_id = parts[0]
-#                         label_str = parts[1].lower()
-#                         if label_str == 'rash':
-#                             label = 1
-#                         elif label_str == 'accident':
-#                             label = 2
-#                         else:
-#                             label = 0
-#                         label_dict[vehicle_id] = label
-#
-#             # 处理每个车辆的轨迹
-#             for vehicle_id, trajectory in data.items():
-#                 if len(trajectory) < 2:
-#                     continue
-#
-#                 # 提取轨迹点
-#                 traj_points = []
-#                 for point in trajectory[1:]:
-#                     if isinstance(point, list) and len(point) >= 4:
-#                         x1, y1, x2, y2 = point[:4]
-#                         center_x = (x1 + x2) / 2
-#                         center_y = (y1 + y2) / 2
-#                         width = x2 - x1
-#                         height = y2 - y1
-#                         traj_points.append([center_x, center_y, width, height])
-#
-#                 if len(traj_points) < 3:
-#                     continue
-#
-#                 # 获取标签
-#                 label = label_dict.get(vehicle_id, 0)
-#
-#                 # 添加原始样本
-#                 self._add_sequence(traj_points, label)
-#
-#                 # 对少数类进行数据增强
-#                 if self.augment and label != 0:
-#                     self._augment_sequence(traj_points, label)
-#
-#         # 转换为numpy数组
-#         self.sequences = np.array(self.sequences, dtype=np.float32)
-#         self.labels = np.array(self.labels, dtype=np.int64)
-#         self.sequence_lengths = np.array(self.sequence_lengths, dtype=np.int64)
-#
-#         print(f"Dataset loaded: {len(self.sequences)} sequences")
-#         print(f"Class distribution after augmentation: {Counter(self.labels)}")
-#
-#     def _add_sequence(self, traj_points, label):
-#         """添加序列到数据集"""
-#         traj_with_features = self._add_motion_features(traj_points)
-#
-#         # 截断或填充序列
-#         if len(traj_with_features) > self.max_seq_len:
-#             traj_with_features = traj_with_features[:self.max_seq_len]
-#         else:
-#             padding = [[0, 0, 0, 0, 0, 0]] * (self.max_seq_len - len(traj_with_features))
-#             traj_with_features.extend(padding)
-#
-#         self.sequences.append(traj_with_features)
-#         self.labels.append(label)
-#         self.sequence_lengths.append(min(len(traj_points), self.max_seq_len))
-#
-#     def _augment_sequence(self, traj_points, label):
-#         """对少数类进行数据增强"""
-#         # 1. 添加高斯噪声
-#         if np.random.random() > 0.5:
-#             noise_traj = []
-#             for point in traj_points:
-#                 noise_point = [
-#                     point[0] + np.random.normal(0, 2),  # center_x
-#                     point[1] + np.random.normal(0, 2),  # center_y
-#                     max(10, point[2] + np.random.normal(0, 1)),  # width
-#                     max(10, point[3] + np.random.normal(0, 1)),  # height
-#                 ]
-#                 noise_traj.append(noise_point)
-#             self._add_sequence(noise_traj, label)
-#
-#         # 2. 时间缩放（仅对足够长的序列）
-#         if len(traj_points) > 10 and np.random.random() > 0.5:
-#             scale_factor = np.random.uniform(0.8, 1.2)
-#             scaled_traj = []
-#             for i in range(len(traj_points)):
-#                 idx = min(int(i * scale_factor), len(traj_points) - 1)
-#                 scaled_traj.append(traj_points[idx])
-#             self._add_sequence(scaled_traj, label)
-#
-#     def _add_motion_features(self, traj_points):
-#         """添加运动特征"""
-#         traj_with_features = []
-#
-#         for i in range(len(traj_points)):
-#             if i == 0:
-#                 vx, vy = 0, 0
-#             else:
-#                 vx = traj_points[i][0] - traj_points[i - 1][0]
-#                 vy = traj_points[i][1] - traj_points[i - 1][1]
-#
-#             features = [
-#                 traj_points[i][0],  # center_x
-#                 traj_points[i][1],  # center_y
-#                 traj_points[i][2],  # width
-#                 traj_points[i][3],  # height
-#                 vx,  # velocity_x
-#                 vy  # velocity_y
-#             ]
-#             traj_with_features.append(features)
-#
-#         return traj_with_features
-#
-#     def __len__(self):
-#         return len(self.sequences)
-#
-#     def __getitem__(self, idx):
-#         return (
-#             torch.FloatTensor(self.sequences[idx]),
-#             torch.tensor(self.labels[idx], dtype=torch.long),
-#             torch.tensor(self.sequence_lengths[idx], dtype=torch.long)
-#         )
-#
-#
-# class ImprovedLSTMModel(nn.Module):
-#     """改进的LSTM模型，添加Dropout和BatchNorm"""
-#
-#     def __init__(self, input_dim=6, hidden_dim=128, num_layers=2, num_classes=3, dropout=0.5):
-#         super(ImprovedLSTMModel, self).__init__()
-#
-#         self.lstm = nn.LSTM(
-#             input_size=input_dim,
-#             hidden_size=hidden_dim,
-#             num_layers=num_layers,
-#             batch_first=True,
-#             dropout=dropout if num_layers > 1 else 0,
-#             bidirectional=True
-#         )
-#
-#         # 添加BatchNorm
-#         self.bn = nn.BatchNorm1d(hidden_dim * 2)
-#
-#         self.attention = nn.Sequential(
-#             nn.Linear(hidden_dim * 2, hidden_dim),
-#             nn.Tanh(),
-#             nn.Dropout(dropout),
-#             nn.Linear(hidden_dim, 1)
-#         )
-#
-#         self.classifier = nn.Sequential(
-#             nn.Dropout(dropout),
-#             nn.Linear(hidden_dim * 2, hidden_dim),
-#             nn.ReLU(),
-#             nn.BatchNorm1d(hidden_dim),
-#             nn.Dropout(dropout),
-#             nn.Linear(hidden_dim, hidden_dim // 2),
-#             nn.ReLU(),
-#             nn.BatchNorm1d(hidden_dim // 2),
-#             nn.Linear(hidden_dim // 2, num_classes)
-#         )
-#
-#         self._init_weights()
-#
-#     def _init_weights(self):
-#         for name, param in self.lstm.named_parameters():
-#             if 'weight' in name:
-#                 nn.init.orthogonal_(param)
-#             elif 'bias' in name:
-#                 nn.init.constant_(param, 0)
-#
-#     def forward(self, x, lengths):
-#         packed_input = nn.utils.rnn.pack_padded_sequence(
-#             x, lengths.cpu(), batch_first=True, enforce_sorted=False
-#         )
-#
-#         packed_output, (hidden, cell) = self.lstm(packed_input)
-#         output, _ = nn.utils.rnn.pad_packed_sequence(packed_output, batch_first=True)
-#
-#         # 应用BatchNorm
-#         output = output.permute(0, 2, 1)  # (batch, features, seq_len)
-#         output = self.bn(output)
-#         output = output.permute(0, 2, 1)  # (batch, seq_len, features)
-#
-#         attention_weights = torch.softmax(self.attention(output), dim=1)
-#         context_vector = torch.sum(attention_weights * output, dim=1)
-#
-#         logits = self.classifier(context_vector)
-#         return logits
-#
-#
-# def train_epoch(model, dataloader, criterion, optimizer, device):
-#     """训练一个epoch"""
-#     model.train()
-#     total_loss = 0
-#     correct = 0
-#     total = 0
-#
-#     for batch_idx, (sequences, labels, lengths) in enumerate(dataloader):
-#         sequences = sequences.to(device)
-#         labels = labels.to(device)
-#         lengths = lengths.to(device)
-#
-#         optimizer.zero_grad()
-#
-#         outputs = model(sequences, lengths)
-#         loss = criterion(outputs, labels)
-#
-#         loss.backward()
-#         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-#         optimizer.step()
-#
-#         total_loss += loss.item()
-#         _, predicted = torch.max(outputs.data, 1)
-#         total += labels.size(0)
-#         correct += (predicted == labels).sum().item()
-#
-#     avg_loss = total_loss / len(dataloader)
-#     accuracy = 100 * correct / total
-#
-#     return avg_loss, accuracy
-#
-#
-# def evaluate(model, dataloader, criterion, device):
-#     """评估模型"""
-#     model.eval()
-#     total_loss = 0
-#     correct = 0
-#     total = 0
-#
-#     all_predictions = []
-#     all_labels = []
-#     all_probabilities = []
-#
-#     with torch.no_grad():
-#         for sequences, labels, lengths in dataloader:
-#             sequences = sequences.to(device)
-#             labels = labels.to(device)
-#             lengths = lengths.to(device)
-#
-#             outputs = model(sequences, lengths)
-#             loss = criterion(outputs, labels)
-#
-#             total_loss += loss.item()
-#             probabilities = torch.softmax(outputs, dim=1)
-#             _, predicted = torch.max(outputs.data, 1)
-#
-#             total += labels.size(0)
-#             correct += (predicted == labels).sum().item()
-#
-#             all_predictions.extend(predicted.cpu().numpy())
-#             all_labels.extend(labels.cpu().numpy())
-#             all_probabilities.extend(probabilities.cpu().numpy())
-#
-#     avg_loss = total_loss / len(dataloader)
-#     accuracy = 100 * correct / total
-#
-#     return avg_loss, accuracy, all_predictions, all_labels, all_probabilities
-#
-#
-# def main():
-#     """主训练函数"""
-#     # 配置参数
-#     config = {
-#         'data_dir': '/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/BiLSTM_Transformer_data/train_data/',
-#         'label_dir': '/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/BiLSTM_Transformer_data/train_label/',
-#         'max_seq_len': 50,  # 减少序列长度，防止过拟合
-#         'batch_size': 16,  # 减小批量大小
-#         'hidden_dim': 64,  # 减少隐藏层维度
-#         'num_layers': 2,
-#         'dropout': 0.5,  # 增加Dropout
-#         'learning_rate': 0.0001,  # 降低学习率
-#         'num_epochs': 100,
-#         'patience': 10,  # 早停耐心值
-#         'gamma': 2.0,  # Focal Loss参数
-#     }
-#
-#     print("Loading and augmenting dataset...")
-#     dataset = VehicleTrajectoryDataset(
-#         data_dir=config['data_dir'],
-#         label_dir=config['label_dir'],
-#         max_seq_len=config['max_seq_len'],
-#         augment=True  # 启用数据增强
-#     )
-#
-#     # 计算类别权重
-#     class_counts = Counter(dataset.labels)
-#     total = len(dataset.labels)
-#     class_weights = torch.tensor([
-#         total / (len(class_counts) * class_counts[i]) if i in class_counts else 1.0
-#         for i in range(3)
-#     ], dtype=torch.float32).to(device)
-#
-#     print(f"Class weights: {class_weights}")
-#
-#     # 分割数据集
-#     total_size = len(dataset)
-#     train_size = int(0.7 * total_size)  # 减少训练集比例
-#     val_size = int(0.15 * total_size)
-#     test_size = total_size - train_size - val_size
-#
-#     train_dataset, val_dataset, test_dataset = random_split(
-#         dataset, [train_size, val_size, test_size]
-#     )
-#
-#     print(f"\nDataset split:")
-#     print(f"  Train: {len(train_dataset)} samples")
-#     print(f"  Validation: {len(val_dataset)} samples")
-#     print(f"  Test: {len(test_dataset)} samples")
-#
-#     # 创建数据加载器
-#     train_loader = DataLoader(
-#         train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=2
-#     )
-#     val_loader = DataLoader(
-#         val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=2
-#     )
-#     test_loader = DataLoader(
-#         test_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=2
-#     )
-#
-#     # 创建模型
-#     input_dim = dataset.sequences[0].shape[1]
-#     model = ImprovedLSTMModel(
-#         input_dim=input_dim,
-#         hidden_dim=config['hidden_dim'],
-#         num_layers=config['num_layers'],
-#         num_classes=3,
-#         dropout=config['dropout']
-#     )
-#
-#     model = model.to(device)
-#     print(f"\nModel architecture:")
-#     print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
-#
-#     # 定义损失函数和优化器
-#     criterion = FocalLoss(alpha=class_weights, gamma=config['gamma'])
-#     optimizer = optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=0.01)
-#     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['num_epochs'])
-#
-#     # 训练循环
-#     print(f"\nStarting training for {config['num_epochs']} epochs...")
-#
-#     train_losses = []
-#     train_accuracies = []
-#     val_losses = []
-#     val_accuracies = []
-#
-#     best_val_accuracy = 0
-#     best_val_f1 = 0
-#     patience_counter = 0
-#     best_model_state = None
-#
-#     for epoch in range(config['num_epochs']):
-#         # 训练
-#         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-#
-#         # 验证
-#         val_loss, val_acc, val_preds, val_labels, _ = evaluate(model, val_loader, criterion, device)
-#
-#         # 计算F1分数（更关注少数类）
-#         _, _, f1, _ = precision_recall_fscore_support(val_labels, val_preds, average='weighted')
-#
-#         # 更新学习率
-#         scheduler.step()
-#
-#         # 保存记录
-#         train_losses.append(train_loss)
-#         train_accuracies.append(train_acc)
-#         val_losses.append(val_loss)
-#         val_accuracies.append(val_acc)
-#
-#         print(f"Epoch {epoch + 1}/{config['num_epochs']}: "
-#               f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% | "
-#               f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val F1: {f1:.4f}")
-#
-#         # 保存最佳模型（基于F1分数）
-#         if f1 > best_val_f1:
-#             best_val_f1 = f1
-#             best_val_accuracy = val_acc
-#             patience_counter = 0
-#             best_model_state = model.state_dict().copy()
-#
-#             torch.save({
-#                 'epoch': epoch,
-#                 'model_state_dict': best_model_state,
-#                 'optimizer_state_dict': optimizer.state_dict(),
-#                 'val_accuracy': best_val_accuracy,
-#                 'val_f1': best_val_f1,
-#                 'config': config,
-#                 'class_weights': class_weights.cpu().numpy()
-#             }, 'improved_vehicle_behavior_model.pth')
-#
-#             print(f"  New best model saved! F1: {best_val_f1:.4f}")
-#         else:
-#             patience_counter += 1
-#             # if patience_counter >= config['patience']:
-#             #     print(f"Early stopping triggered after {epoch + 1} epochs")
-#             #     break
-#
-#     # 绘制训练历史
-#     plt.figure(figsize=(12, 4))
-#
-#     plt.subplot(1, 2, 1)
-#     plt.plot(train_losses, label='Train Loss')
-#     plt.plot(val_losses, label='Validation Loss')
-#     plt.xlabel('Epoch')
-#     plt.ylabel('Loss')
-#     plt.title('Training and Validation Loss')
-#     plt.legend()
-#     plt.grid(True)
-#
-#     plt.subplot(1, 2, 2)
-#     plt.plot(train_accuracies, label='Train Accuracy')
-#     plt.plot(val_accuracies, label='Validation Accuracy')
-#     plt.xlabel('Epoch')
-#     plt.ylabel('Accuracy (%)')
-#     plt.title('Training and Validation Accuracy')
-#     plt.legend()
-#     plt.grid(True)
-#
-#     plt.tight_layout()
-#     plt.savefig('improved_training_history.png')
-#     plt.close()
-#
-#     # 加载最佳模型进行测试
-#     print("\nLoading best model for testing...")
-#     model.load_state_dict(best_model_state)
-#
-#     # 在测试集上评估
-#     test_loss, test_acc, test_preds, test_labels, test_probs = evaluate(
-#         model, test_loader, criterion, device
-#     )
-#
-#     print(f"\nTest Results:")
-#     print(f"  Loss: {test_loss:.4f}")
-#     print(f"  Accuracy: {test_acc:.2f}%")
-#
-#     # 分类报告
-#     print("\nClassification Report:")
-#     print(classification_report(test_labels, test_preds, target_names=['Normal', 'Rash', 'Accident']))
-#
-#     # 混淆矩阵
-#     cm = confusion_matrix(test_labels, test_preds)
-#     print("Confusion Matrix:")
-#     print(cm)
-#
-#     # 调整阈值后的预测
-#     print("\nAdjusted Threshold Predictions (threshold=0.3 for minority classes):")
-#
-#     adjusted_preds = []
-#     for probs in test_probs:
-#         if probs[1] > 0.3:  # Rash阈值
-#             adjusted_preds.append(1)
-#         elif probs[2] > 0.3:  # Accident阈值
-#             adjusted_preds.append(2)
-#         else:
-#             adjusted_preds.append(0)
-#
-#     print("Adjusted Classification Report:")
-#     print(classification_report(test_labels, adjusted_preds, target_names=['Normal', 'Rash', 'Accident']))
-#
-#     # 保存最终模型
-#     torch.save({
-#         'model_state_dict': model.state_dict(),
-#         'config': config,
-#         'input_dim': input_dim,
-#         'class_names': ['Normal', 'Rash', 'Accident'],
-#         'thresholds': [0.3, 0.3]  # Rash和Accident的阈值
-#     }, 'improved_final_model.pth')
-#
-#     print("\nModel saved as 'improved_final_model.pth'")
-#
-#
-# if __name__ == "__main__":
-#     main()
+
+

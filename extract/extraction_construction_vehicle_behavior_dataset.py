@@ -547,11 +547,11 @@ class YOLOVehicleTracker:
 
 def main():
     # 设置视频路径
-    video_path = "/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/TU-DAT/TU-DAT/Rash-Driving/cctv-v1.mp4"
+    video_path = "/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/TU-DAT/TU-DAT/Final_videos/Positive_Vidoes/"
 
     # 创建车辆追踪器
     tracker = YOLOVehicleTracker(
-        model_path='yolo11x.pt',
+        model_path='/home/next_lb/桌面/next/tempmodel/yolo11x.pt',
         video_path=video_path,
         conf_threshold=0.2,
         iou_threshold=0.45
