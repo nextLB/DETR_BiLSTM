@@ -315,8 +315,10 @@ def determinate_vehicle_behavior_thread(determinateBasicInfoQueue):
             # 将数据信息传入到判别算法实例中
             BiLSTMTransformerInstance.get_basic_info(basicInfo)
 
+        # 进行行为的判定
         if basicInfo:
-            pass
+            # 数据预处理与准备
+            BiLSTMTransformerInstance.data_preprocess_preparation()
 
         basicInfo = None
         time.sleep(0.01)

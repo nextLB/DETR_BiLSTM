@@ -109,5 +109,13 @@ class BiLSTMTransformer:
         if f"{basicInfo[-3]}" not in self.basedFrameCountInfo:
             self.basedFrameCountInfo[f"{basicInfo[-3]}"] = []
         self.basedFrameCountInfo[f"{basicInfo[-3]}"].append(copy.deepcopy((basicInfo[2], basicInfo[3], basicInfo[4], basicInfo[5], basicInfo[6], basicInfo[7])))
-        print(self.basedFrameCountInfo[f"{basicInfo[-3]}"])
+
+    # 计算目标基于像素的特定帧数的过去的位移
+    def calculate_frame_pixel_displacement(self):
+        pass
+
+    # 数据预处理与准备
+    def data_preprocess_preparation(self):
+        # 计算目标基于像素的特定帧数的过去的位移
+        self.calculate_frame_pixel_displacement()
 
