@@ -99,8 +99,8 @@ class BiLSTMTransformer:
         self.displacementIntervalFrameCount = 5
 
         # 超速行为相关参数
-        self.rashRelatedParaOne = 0.003
-        self.rashRelatedParaTwo = 8
+        self.rashRelatedParaOne = 0.0012
+        self.rashRelatedParaTwo = 10
 
 
         # 暂存信息的属性
@@ -192,7 +192,6 @@ class BiLSTMTransformer:
         self.tempRecordRashStatusList = []
 
 
-
         # 计算目标基于像素的特定帧数的过去的位移
         self.calculate_frame_pixel_displacement()
 
@@ -212,7 +211,11 @@ class BiLSTMTransformer:
                 if value > self.rashRelatedParaTwo:
                     self.tempRecordRashStatusList.append(key)
 
+            # 先打印一下是否有超速危险的检测
+            # for key, value in
             print(self.tempRecordRashStatusList)
 
-            # 接下来取出候选超速列表中的id进行进一步确认处理
+
+
+            # 接下来取出候选超速列表中的id进行进一步确认处理关于事故的检测
 
