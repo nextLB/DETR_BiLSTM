@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 TRAIN_CAR_DATA_DIR = '/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/V2_BiLSTM_DATA/train_data/'
 TRAIN_CAR_LABEL_DIR = '/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/V2_BiLSTM_DATA/train_label/'
-
+SAVE_MODEL_PATH_DIR = '/home/next_lb/桌面/next/tempmodel/'
 
 TRACK_CLASS_INDEX = 0
 TRACK_ID_INDEX = 1
@@ -29,7 +29,7 @@ TRACK_FRAME_HEIGHT_INDEX = 9
 
 SEQUENCE_LENGTH = 20
 
-MAX_EPOCHS = 50
+MAX_EPOCHS = 100
 BATCH_SIZE = 32
 NUM_WORKS = 16
 
@@ -240,7 +240,8 @@ def main():
     )
 
 
-
+    os.makedirs(SAVE_MODEL_PATH_DIR, exist_ok=True)
+    bestLoss = float("inf")
     for epoch in range(MAX_EPOCHS):
         totalTrainLoss = 0
         batchCount = 0
@@ -263,6 +264,7 @@ def main():
             # 更新进度条
             if batchCount % 100 == 0:
                 pbar.set_postfix({'loss': loss.item()})
+            if batchCount % 500 == 0:
                 _, predicted = torch.max(outputs.data, 1)
                 print(f"predicted labels: {predicted}, true labels: {labels}")
 
@@ -270,6 +272,9 @@ def main():
         # 学习率调整
         scheduler.step(averageLoss)
         print(f"current epoch: {epoch+1}, average loss: {averageLoss}")
+        if averageLoss <= bestLoss:
+            torch.save(BiLSTM_Model_Instance.state_dict(), f"{SAVE_MODEL_PATH_DIR}/best_Bi_LSTM_model.pth")
+            print(f"已经成功保存: {SAVE_MODEL_PATH_DIR}/best_Bi_LSTM_model.pth")
 
 
 
