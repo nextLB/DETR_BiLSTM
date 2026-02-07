@@ -148,8 +148,8 @@ class CarTrackDataset(Dataset):
                     if f"{value[j][TRACK_ID_INDEX]}" not in self.IDCarTrainData:
                         self.IDCarTrainData[f"{value[j][TRACK_ID_INDEX]}"] = []
 
-                    normalX = (value[j][TRACK_X2_INDEX] - value[j][TRACK_X1_INDEX]) / value[j][TRACK_FRAME_WIDTH_INDEX]
-                    normalY = (value[j][TRACK_Y2_INDEX] - value[j][TRACK_Y1_INDEX]) / value[j][TRACK_FRAME_HEIGHT_INDEX]
+                    normalX = (value[j][TRACK_X1_INDEX] + value[j][TRACK_X2_INDEX]) / (2 * value[j][TRACK_FRAME_WIDTH_INDEX])
+                    normalY = (value[j][TRACK_Y1_INDEX] + value[j][TRACK_Y2_INDEX]) / (2 * value[j][TRACK_FRAME_HEIGHT_INDEX])
                     # 计算宽高比
                     widthRate = (value[j][TRACK_X2_INDEX] - value[j][TRACK_X1_INDEX]) / value[j][TRACK_FRAME_WIDTH_INDEX]
                     heightRate = (value[j][TRACK_Y2_INDEX] - value[j][TRACK_Y1_INDEX]) / value[j][TRACK_FRAME_HEIGHT_INDEX]
@@ -240,8 +240,9 @@ def main():
     )
 
 
-    totalTrainLoss = 0
+
     for epoch in range(MAX_EPOCHS):
+        totalTrainLoss = 0
         batchCount = 0
         pbar = tqdm(trainDataLoader, desc=f'Epoch {epoch+1}/{MAX_EPOCHS}')
         for inputs, labels in pbar:
@@ -249,25 +250,21 @@ def main():
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = BiLSTM_Model_Instance(inputs)
             loss = criterion(outputs, labels)
-
             loss.backward()
 
             # 梯度裁剪防止梯度爆炸
             torch.nn.utils.clip_grad_norm_(BiLSTM_Model_Instance.parameters(), max_norm=1.0)
 
 
-
             optimizer.step()
             optimizer.zero_grad()
-
             totalTrainLoss += loss.item()
 
             # 更新进度条
             if batchCount % 100 == 0:
                 pbar.set_postfix({'loss': loss.item()})
-
-            # _, predicted = torch.max(outputs.data, 1)
-            # print(predicted, labels)
+                _, predicted = torch.max(outputs.data, 1)
+                print(f"predicted labels: {predicted}, true labels: {labels}")
 
         averageLoss = totalTrainLoss / len(trainDataLoader)
         # 学习率调整
