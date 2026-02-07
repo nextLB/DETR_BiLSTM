@@ -166,7 +166,6 @@ class BiLSTMTransformer:
         if f"{basicInfo[-3]}" not in self.basedFrameCountInfo:
             self.basedFrameCountInfo[f"{basicInfo[-3]}"] = []
         self.basedFrameCountInfo[f"{basicInfo[-3]}"].append(copy.deepcopy((basicInfo[2], basicInfo[3], basicInfo[4], basicInfo[5], basicInfo[6], basicInfo[7])))
-        print(self.basedFrameCountInfo)
 
 
 

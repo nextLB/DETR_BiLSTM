@@ -11,6 +11,10 @@ sys.path.append('/home/next_lb/桌面/next/DETR_BiLSTM')
 from BiLSTM_TRS_MODEL.V2 import BiLSTMTransformer
 from collections import defaultdict
 import numpy as np
+import re
+import json
+
+EXTRACT_BILSTM_RAW_DATA_PATH = '/home/next_lb/桌面/next/CAR_DETECTION_TRACK/data/V2_BiLSTM_DATA/train_data/'
 
 def draw_detections_with_trajectories(image_data, history_basic_info,
                                       history_points=20,  # 要绘制的历史轨迹点数
@@ -188,6 +192,8 @@ def vision_inference_thread(visualBasicInfoQueue, determinateBasicInfoQueue, ima
     DETRModelPath = '/home/next_lb/桌面/next/tempmodel/DETRX.pt'
     # 加载DETRModel
     DETRModel, vehicleClassIds = load_DETR_model(DETRModelPath)
+    # 使用正则表达式提取数字部分
+    videoNames= sorted(videoNames, key=lambda x: int(re.search(r'v(\d+)', x).group(1)))
 
     i = 0
     currentFrameCount = 0
@@ -195,6 +201,7 @@ def vision_inference_thread(visualBasicInfoQueue, determinateBasicInfoQueue, ima
         if i >= len(videoNames):
             continue
         else:
+            extractCarData = {}
             # 进行模型推理识别
             confThreshold = 0.2
             iouThreshold = 0.45
@@ -232,7 +239,22 @@ def vision_inference_thread(visualBasicInfoQueue, determinateBasicInfoQueue, ima
                             trackId = int(box.id[0])
                             visualBasicInfoQueue.put((videoNames[i], className, trackId, float(x1), float(y1), float(x2), float(y2), confidence, currentFrameCount))
                             determinateBasicInfoQueue.put((videoNames[i], className, trackId, float(x1), float(y1), float(x2), float(y2), confidence, currentFrameCount, imageWidth, imageHeight))
+
+                            # 记录到内存中，便于存入到数据集中
+                            if f"{currentFrameCount}" not in extractCarData:
+                                extractCarData[f"{currentFrameCount}"] = []
+                            extractCarData[f"{currentFrameCount}"].append((className, trackId, float(x1), float(y1), float(x2), float(y2), confidence, currentFrameCount, imageWidth, imageHeight))
+
                 time.sleep(0.1)
+
+
+
+            # saveVehicleBehaviorDataPath = os.path.join(EXTRACT_BILSTM_RAW_DATA_PATH, f"{videoNames[i].split('.')[0]}_data.json")
+            # # 保存为JSON文件
+            # with open(saveVehicleBehaviorDataPath, 'w', encoding='utf-8') as f:
+            #     json.dump(extractCarData, f, ensure_ascii=False, indent=4)
+
+
         i += 1
         time.sleep(1)
 
