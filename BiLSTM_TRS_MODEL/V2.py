@@ -102,12 +102,17 @@ class BiLSTMTransformer:
         self.rashRelatedParaOne = 0.0012
         self.rashRelatedParaTwo = 10
 
+        # 是否出现交通事故的相关参数
+        self.accidentRelatedParaOne = 0.03
+        self.accidentRelatedParaTwo = 10
+
 
         # 暂存信息的属性
         self.tempRecordDisplacement = {}
         self.tempRecordDispSpeed = {}
         self.tempRecordRashTwoCount = {}
         self.tempRecordRashStatusList = []
+        self.tempRecordAccidentCount = {}
 
     def get_nth_last_from_dict(self, dictionary, n):
         """
@@ -155,6 +160,7 @@ class BiLSTMTransformer:
             self.currentVideoWidth = basicInfo[-2]
             self.currentVideoHeight = basicInfo[-1]
             self.tempRecordRashTwoCount = {}
+            self.tempRecordAccidentCount = {}
         self.historyBasicInfo[basicInfo[0]].append(copy.deepcopy(basicInfo))
         # 处理与清晰数据等
         if f"{basicInfo[-3]}" not in self.basedFrameCountInfo:
@@ -215,7 +221,7 @@ class BiLSTMTransformer:
 
             # 先打印一下是否有超速危险的检测
             for i in range(len(self.tempRecordRashStatusList)):
-                print(f'追踪ID为: {self.tempRecordRashStatusList[i]}的车辆有超速的危险')
+                print(f'基于简单的规则--------------追踪ID为: {self.tempRecordRashStatusList[i]}的车辆有超速的危险')
             print('-'*30)
             print('-'*30)
             print('-'*30)
@@ -224,6 +230,35 @@ class BiLSTMTransformer:
             # 接下来取出候选超速列表中的id进行进一步确认处理关于事故的检测
             for i in range(len(self.tempRecordRashStatusList)):
                 for j in range(i+1, len(self.tempRecordRashStatusList)):
-                    # 取出这两个ID车辆当前最新的信息
-                    print(int(self.tempRecordRashStatusList[i]), int(self.tempRecordRashStatusList[j]))
+                    # 查找这两个ID对应的识别信息
+                    theLastOneData = self.get_nth_last_from_dict(self.basedFrameCountInfo, 1)
+                    iInfo = None
+                    jInfo = None
+                    for k in range(len(theLastOneData[1])):
+                        if iInfo != None and jInfo != None:
+                            break
+                        else:
+                            if theLastOneData[1][k][0] == int(self.tempRecordRashStatusList[i]):
+                                iInfo = theLastOneData[1][k]
+                            elif theLastOneData[1][k][0] == int(self.tempRecordRashStatusList[j]):
+                                jInfo = theLastOneData[1][k]
+
+                    if iInfo and jInfo:
+                        # 计算两个追踪ID车辆之间归一化后的中心坐标点之间的距离
+                        x1NormalDiff = (iInfo[3] - iInfo[1]) / self.currentVideoWidth
+                        y1NormalDiff = (iInfo[4] - iInfo[2]) / self.currentVideoHeight
+                        x2NormalDiff = (jInfo[3] - jInfo[1]) / self.currentVideoWidth
+                        y2NormalDiff = (jInfo[4] - jInfo[2]) / self.currentVideoHeight
+                        normalDistance = self.euclidean_distance((x1NormalDiff, y1NormalDiff), (x2NormalDiff, y2NormalDiff))
+                        if normalDistance < self.accidentRelatedParaOne:
+                            if f"{self.tempRecordRashStatusList[i]}_{self.tempRecordRashStatusList[j]}" not in self.tempRecordAccidentCount:
+                                self.tempRecordAccidentCount[f"{self.tempRecordRashStatusList[i]}_{self.tempRecordRashStatusList[j]}"] = 0
+                            self.tempRecordAccidentCount[f"{self.tempRecordRashStatusList[i]}_{self.tempRecordRashStatusList[j]}"] += 1
+
+            for key, value in self.tempRecordAccidentCount.items():
+                print(f"基于简单的规则-------------- {key} 发生了车祸似乎")
+
+
+
+
 
