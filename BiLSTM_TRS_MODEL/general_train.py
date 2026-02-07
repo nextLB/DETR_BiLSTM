@@ -34,12 +34,13 @@ BATCH_SIZE = 32
 NUM_WORKS = 16
 
 
-INPUT_SIZE = 3
-DROPOUT_RATE = 0.3
-HIDDEN_SIZE = 128
-NUM_LAYERS = 8
-LEARNING_RATE = 0.00001
+INPUT_SIZE = 5
+DROPOUT_RATE = 0.5
+HIDDEN_SIZE = 64
+NUM_LAYERS = 2
+LEARNING_RATE = 0.0001
 NUM_CLASSES = 2
+
 
 class BiLSTM_Model(nn.Module):
     def __init__(self, inputSize, hiddenSize, numLayers, numClasses):
@@ -49,45 +50,45 @@ class BiLSTM_Model(nn.Module):
         self.numLayers = numLayers
         self.numClasses = numClasses
 
-        # 双向LSTM层
+        # 双向LSTM
         self.lstm = nn.LSTM(
-            self.inputSize,
-            self.hiddenSize,
-            self.numLayers,
+            input_size=self.inputSize,
+            hidden_size=self.hiddenSize,
+            num_layers=self.numLayers,
             batch_first=True,
-            bidirectional=True
+            bidirectional=True,
+            dropout=DROPOUT_RATE if numLayers > 1 else 0
         )
 
-        # Dropout 层防止过拟合
-        self.dropout = nn.Dropout(DROPOUT_RATE)
+        # 注意层
+        self.attention = nn.Sequential(
+            nn.Linear(self.hiddenSize * 2, self.hiddenSize),
+            nn.Tanh(),
+            nn.Linear(self.hiddenSize, 1)
+        )
 
-        # 全连接层
-        self.fc = nn.Linear(self.hiddenSize * 2, 64)  # 双向所以hidden_size*2
-        self.fc2 = nn.Linear(64, self.numClasses)
-
-        # 激活函数
-        self.relu = nn.ReLU()
+        # 分类头
+        self.classifier = nn.Sequential(
+            nn.Dropout(DROPOUT_RATE),
+            nn.Linear(self.hiddenSize * 2, 64),
+            nn.ReLU(),
+            nn.Dropout(DROPOUT_RATE),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, self.numClasses)
+        )
 
     def forward(self, x):
-        # 设置初始隐藏状态
-        h0 = torch.zeros(self.numLayers * 2, x.size(0), self.hiddenSize).to(x.device)  # 双向所以*2
-        c0 = torch.zeros(self.numLayers * 2, x.size(0), self.hiddenSize).to(x.device)
+        # LSTM输出
+        lstm_out, (hidden, cell) = self.lstm(x)
 
-        # 前向传播LSTM
-        out, _ = self.lstm(x, (h0, c0))
+        # 注意力机制
+        attention_weights = torch.softmax(self.attention(lstm_out), dim=1)
+        context_vector = torch.sum(attention_weights * lstm_out, dim=1)
 
-        # 取最后一个时间步的输出
-        out = out[:, -1, :]
-
-        # 全连接层
-        out = self.dropout(out)
-        out = self.fc(out)
-        out = self.relu(out)
-        out = self.dropout(out)
-        out = self.fc2(out)
-
+        # 分类
+        out = self.classifier(context_vector)
         return out
-
 
 class CarTrackDataset(Dataset):
     def __init__(self, SEQUENCE_LENGTH):
@@ -127,7 +128,6 @@ class CarTrackDataset(Dataset):
 
         # load data
         for i in range(len(self.specificDataPath)):
-
             with open(self.specificDataPath[i], 'r') as f:
                 specificData = json.load(f)
             specificFPS = 0
@@ -141,6 +141,7 @@ class CarTrackDataset(Dataset):
                         splitStr = line.split(',')
                         specificLabel.append(copy.deepcopy((splitStr[0].strip(), splitStr[1].strip())))
 
+            changeLabelCount = 0
             # 根据车辆ID整合轨迹点
             for key, value in specificData.items():
                 for j in range(len(value)):
@@ -149,13 +150,19 @@ class CarTrackDataset(Dataset):
 
                     normalX = (value[j][TRACK_X2_INDEX] - value[j][TRACK_X1_INDEX]) / value[j][TRACK_FRAME_WIDTH_INDEX]
                     normalY = (value[j][TRACK_Y2_INDEX] - value[j][TRACK_Y1_INDEX]) / value[j][TRACK_FRAME_HEIGHT_INDEX]
+                    # 计算宽高比
+                    widthRate = (value[j][TRACK_X2_INDEX] - value[j][TRACK_X1_INDEX]) / value[j][TRACK_FRAME_WIDTH_INDEX]
+                    heightRate = (value[j][TRACK_Y2_INDEX] - value[j][TRACK_Y1_INDEX]) / value[j][TRACK_FRAME_HEIGHT_INDEX]
                     # 设置具体的label
                     labelCount = 0
                     for k in range(len(specificLabel)):
                         if specificLabel[k][0] == f"{value[j][TRACK_ID_INDEX]}":
                             if specificLabel[k][1] == 'accident':
-                                labelCount = 1
-                    self.IDCarTrainData[f"{value[j][TRACK_ID_INDEX]}"].append(copy.deepcopy((specificFPS, normalX, normalY, labelCount)))
+                                if changeLabelCount >= self.SEQUENCE_LENGTH:
+                                    labelCount = 1
+                                else:
+                                    changeLabelCount += 1
+                    self.IDCarTrainData[f"{value[j][TRACK_ID_INDEX]}"].append(copy.deepcopy((specificFPS, normalX, normalY, labelCount, widthRate, heightRate)))
 
 
         # 整合所有的训练数据信息，便于后续训练获取
@@ -176,14 +183,16 @@ class CarTrackDataset(Dataset):
                 normalX = 0
                 normalY = 0
                 tempLabel = 0
+                widthRate = 0
+                heightRate = 0
                 for i in range(min(len(value), maxLength)):
-                    fps, normalX, normalY, tempLabel = value[i]
-                    tempFeatures.append(copy.deepcopy([fps, normalX, normalY]))
+                    fps, normalX, normalY, tempLabel, widthRate, heightRate = value[i]
+                    tempFeatures.append(copy.deepcopy([fps, normalX, normalY, widthRate, heightRate]))
 
 
                 if len(tempFeatures) < maxLength:
                     for i in range(maxLength - len(tempFeatures)):
-                        tempFeatures.append(copy.deepcopy([fps, normalX, normalY]))
+                        tempFeatures.append(copy.deepcopy([fps, normalX, normalY, widthRate, heightRate]))
 
 
                 for i in range(maxLength-self.SEQUENCE_LENGTH):
