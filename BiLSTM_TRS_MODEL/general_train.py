@@ -30,15 +30,15 @@ TRACK_FRAME_HEIGHT_INDEX = 9
 SEQUENCE_LENGTH = 20
 
 MAX_EPOCHS = 50
-BATCH_SIZE = 4
-NUM_WORKS = 4
+BATCH_SIZE = 32
+NUM_WORKS = 16
 
 
 INPUT_SIZE = 3
 DROPOUT_RATE = 0.3
 HIDDEN_SIZE = 128
-NUM_LAYERS = 2
-LEARNING_RATE = 0.001
+NUM_LAYERS = 8
+LEARNING_RATE = 0.00001
 NUM_CLASSES = 2
 
 class BiLSTM_Model(nn.Module):
@@ -225,32 +225,45 @@ def main():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(BiLSTM_Model_Instance.parameters(), lr=LEARNING_RATE)
 
-
+    # 学习率调度器
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5
+    )
 
 
     totalTrainLoss = 0
     for epoch in range(MAX_EPOCHS):
+        batchCount = 0
         pbar = tqdm(trainDataLoader, desc=f'Epoch {epoch+1}/{MAX_EPOCHS}')
         for inputs, labels in pbar:
+            batchCount += 1
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = BiLSTM_Model_Instance(inputs)
             loss = criterion(outputs, labels)
 
             loss.backward()
+
+            # 梯度裁剪防止梯度爆炸
+            torch.nn.utils.clip_grad_norm_(BiLSTM_Model_Instance.parameters(), max_norm=1.0)
+
+
+
             optimizer.step()
             optimizer.zero_grad()
 
             totalTrainLoss += loss.item()
 
             # 更新进度条
-            pbar.set_postfix({'loss': loss.item()})
+            if batchCount % 100 == 0:
+                pbar.set_postfix({'loss': loss.item()})
 
             # _, predicted = torch.max(outputs.data, 1)
             # print(predicted, labels)
 
         averageLoss = totalTrainLoss / len(trainDataLoader)
-
-        print(f"average loss: {averageLoss}, current epoch: {epoch}")
+        # 学习率调整
+        scheduler.step(averageLoss)
+        print(f"current epoch: {epoch+1}, average loss: {averageLoss}")
 
 
 
