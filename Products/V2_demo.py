@@ -344,6 +344,7 @@ def determinate_vehicle_behavior_thread(determinateBasicInfoQueue):
             # 基于简单的规则的进行行为的判别
             BiLSTMTransformerInstance.conduct_behavior_assessment()
             # 使用机器学习等方式进行行为的判定
+            BiLSTMTransformerInstance.determine_behavior_machine_learning()
 
 
 

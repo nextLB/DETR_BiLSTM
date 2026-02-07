@@ -273,6 +273,7 @@ def main():
         scheduler.step(averageLoss)
         print(f"current epoch: {epoch+1}, average loss: {averageLoss}")
         if averageLoss <= bestLoss:
+            bestLoss = averageLoss
             torch.save(BiLSTM_Model_Instance.state_dict(), f"{SAVE_MODEL_PATH_DIR}/best_Bi_LSTM_model.pth")
             print(f"已经成功保存: {SAVE_MODEL_PATH_DIR}/best_Bi_LSTM_model.pth")
 

@@ -1,97 +1,22 @@
 
+import sys
+
+import cv2
 import torch
-import torch.nn as nn
+
+sys.path.append('/home/next_lb/桌面/next/DETR_BiLSTM/BiLSTM_TRS_MODEL')
+from general_train import *
 import copy
 import math
 
-# 3. BiLSTM+Transformer模型
-class noBiLSTMTransformer(nn.Module):
-    def __init__(self, input_dim=7, hidden_dim=128, num_layers=2,
-                 num_heads=8, dropout=0.2, num_classes=3):
-        super(noBiLSTMTransformer, self).__init__()
-
-        self.lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=dropout if num_layers > 1 else 0
-        )
-
-        self.lstm_fc = nn.Linear(hidden_dim * 2, hidden_dim)
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim * 4,
-            dropout=dropout,
-            batch_first=True
-        )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
-
-        self.fc = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, num_classes)
-        )
-
-        self.ln1 = nn.LayerNorm(hidden_dim * 2)
-        self.ln2 = nn.LayerNorm(hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-
-        self._init_weights()
-
-    def _init_weights(self):
-        for name, param in self.named_parameters():
-            if 'weight' in name and param.dim() > 1:
-                nn.init.xavier_uniform_(param)
-            elif 'bias' in name:
-                nn.init.constant_(param, 0)
-
-    def forward(self, x, seq_lens=None):
-        batch_size, seq_len, _ = x.shape
-
-        lstm_out, _ = self.lstm(x)
-        lstm_out = self.ln1(lstm_out)
-        lstm_out = self.dropout(lstm_out)
-
-        lstm_out = self.lstm_fc(lstm_out)
-        lstm_out = self.ln2(lstm_out)
-
-        if seq_lens is not None:
-            mask = self._create_mask(seq_lens, seq_len).to(x.device)
-        else:
-            mask = None
-
-        transformer_out = self.transformer_encoder(lstm_out, src_key_padding_mask=mask)
-
-        if mask is not None:
-            mask_expanded = mask.unsqueeze(-1).expand_as(transformer_out)
-            transformer_out = transformer_out.masked_fill(mask_expanded, 0)
-            valid_counts = (~mask).float().sum(dim=1, keepdim=True)
-            pooled = transformer_out.sum(dim=1) / valid_counts.clamp(min=1)
-        else:
-            pooled = transformer_out.mean(dim=1)
-
-        output = self.fc(pooled)
-
-        return output
-
-    def _create_mask(self, seq_lens, max_len):
-        batch_size = len(seq_lens)
-        mask = torch.ones(batch_size, max_len, dtype=torch.bool)
-        for i, length in enumerate(seq_lens):
-            if length < max_len:
-                mask[i, length:] = False
-        return mask
 
 
 
 class BiLSTMTransformer:
     def __init__(self):
         self.name = 'BiLSTMTransformer'
+        self.fps = 0
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.historyBasicInfo = {}
         self.basedFrameCountInfo = {}
         self.currentVideoWidth = 0
@@ -113,6 +38,20 @@ class BiLSTMTransformer:
         self.tempRecordRashTwoCount = {}
         self.tempRecordRashStatusList = []
         self.tempRecordAccidentCount = {}
+
+        # 加载Bi LSTM模型
+        self.BiLSTMModel = BiLSTM_Model(
+            inputSize=INPUT_SIZE,
+            hiddenSize=HIDDEN_SIZE,
+            numLayers=NUM_LAYERS,
+            numClasses=NUM_CLASSES
+        )
+        # 加载模型权重
+        self.BiLSTMModel.load_state_dict(torch.load(f"{SAVE_MODEL_PATH_DIR}/best_Bi_LSTM_model.pth", map_location=self.device))
+        self.BiLSTMModel.to(self.device)
+
+        self.IDTrackInfo = {}
+
 
     def get_nth_last_from_dict(self, dictionary, n):
         """
@@ -161,12 +100,27 @@ class BiLSTMTransformer:
             self.currentVideoHeight = basicInfo[-1]
             self.tempRecordRashTwoCount = {}
             self.tempRecordAccidentCount = {}
+            self.IDTrackInfo = {}
+            cap = cv2.VideoCapture(f"/home/next_lb/桌面/next/DETR_BiLSTM/test_videos/{basicInfo[0]}")
+            self.fps = cap.get(cv2.CAP_PROP_FPS)
+            cap.release()
         self.historyBasicInfo[basicInfo[0]].append(copy.deepcopy(basicInfo))
         # 处理与清晰数据等
         if f"{basicInfo[-3]}" not in self.basedFrameCountInfo:
             self.basedFrameCountInfo[f"{basicInfo[-3]}"] = []
         self.basedFrameCountInfo[f"{basicInfo[-3]}"].append(copy.deepcopy((basicInfo[2], basicInfo[3], basicInfo[4], basicInfo[5], basicInfo[6], basicInfo[7])))
 
+        # 处理出一个按照追踪ID存储的历史数据信息
+        if basicInfo[0] in self.historyBasicInfo:
+            if f"{basicInfo[2]}" not in self.IDTrackInfo:
+                self.IDTrackInfo[f"{basicInfo[2]}"] = []
+            # 处理成可用的feature再加入到缓存中
+            normalX = (basicInfo[3] + basicInfo[5]) / (2 * basicInfo[9])
+            normalY = (basicInfo[4] + basicInfo[6]) / (2 * basicInfo[10])
+            # 计算宽高比
+            widthRate = (basicInfo[5] - basicInfo[3]) / basicInfo[9]
+            heightRate = (basicInfo[6] - basicInfo[4]) / basicInfo[10]
+            self.IDTrackInfo[f"{basicInfo[2]}"].append(copy.deepcopy((self.fps, normalX, normalY, widthRate, heightRate)))
 
 
     # 计算目标基于像素的特定帧数的过去的位移
@@ -259,6 +213,24 @@ class BiLSTMTransformer:
 
             for key, value in self.tempRecordAccidentCount.items():
                 print(f"基于简单的规则-------------- {key} 发生了车祸似乎")
+
+
+
+    # 使用机器学习等方式进行行为的判定
+    def determine_behavior_machine_learning(self):
+        for key, value in self.IDTrackInfo.items():
+            if len(value) >= SEQUENCE_LENGTH:
+                inputFeatures = value[-SEQUENCE_LENGTH:]
+                inputFeatures = torch.FloatTensor(inputFeatures).unsqueeze(0).to(self.device)
+                # 预测
+                with torch.no_grad():
+                    outputs = self.BiLSTMModel(inputFeatures)
+                    probabilities = torch.softmax(outputs, dim=1)
+                    confidence, prediction = torch.max(probabilities, dim=1)
+                # 提取tensor中的数值
+                predictionValue = prediction.item()  # 提取预测类别（0或1）
+                confidenceValue = confidence.item()  # 提取置信度（浮点数）
+                print(f"基于神经网络模型的方式--------------------------- track id 为: {key}, 当前BiLSTM模型预测的行为是: {predictionValue}, 置信度是: {confidenceValue:.4f}")
 
 
 
