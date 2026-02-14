@@ -10,6 +10,12 @@ INCLUDE_KEY = '__include__'
 
 
 
+# TASKS :Dict[str, BaseSolver] = {
+#     'classification': ClasSolver,
+#     'detection': DetSolver,
+# }
+
+
 def load_config(filePath, cfg=dict()):
     _, ext = os.path.splitext(filePath)
     assert ext in ['.yml', '.yaml'], "only support yaml files"
